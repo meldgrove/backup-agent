@@ -25,12 +25,16 @@ work=$(mktemp -d)
 state=$work/state
 files=$work/data/files
 uploads=$work/data/uploads
-mkdir -p "$state" "$files/docs" "$files/empty" "$uploads" "$work/out"
+private=$work/private
+mkdir -p "$state" "$files/docs" "$files/empty" "$uploads" "$work/out" "$private"
 server=""
 
+# as_root <command...>: runs a command of the image as root, with $private at /v.
+as_root() { docker run --rm --user 0 --entrypoint "$1" --volume "$private:/v" "$image" "${@:2}"; }
 cleanup() {
   docker rm --force backup-agent-test backup-agent-test-db > /dev/null 2>&1 || true
   [ -z "$server" ] || kill "$server" 2> /dev/null || true
+  as_root rm -rf /v/jane-doe > /dev/null 2>&1 || true
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -219,5 +223,38 @@ stop
 eventually 5 test -s "$state/fail.json" || fail "no failure reported"
 [ "$(jq -r .message "$state/fail.json")" = "The agent was stopped" ] || fail "unexpected failure: $(cat "$state/fail.json")"
 pass "a stopped agent reports the job as failed"
+
+# Reimbursements: the app (uid 10001) keeps private folders (mode 0700). As
+# nobody the agent cannot list them: check reports a problem, and the backup
+# fails, naming the volume but not the folder. As the app's user both work.
+as_root sh -c 'mkdir /v/jane-doe && echo receipt > /v/jane-doe/receipt.pdf &&
+  chown -R 10001:10001 /v/jane-doe && chmod 700 /v/jane-doe && chmod 600 /v/jane-doe/receipt.pdf'
+chmod a+rX "$private"
+private_settings=("${agent_settings[@]}" --volume "$private:/data/private_data:ro")
+folder_message='A folder in the volume "private_data" cannot be read (permission denied). Run the agent as the app'"'"'s user: set user: of the backup-agent service, such as "10001:10001".'
+output=$(docker run --rm "${private_settings[@]}" "$image" check) && fail "check passed with a folder it cannot read: $output"
+grep -qF 'problem  Volume private_data: backups fail. A folder cannot be read: "jane-doe" (permission denied). Run the agent as the app'"'"'s user: set user: of the backup-agent service, such as "10001:10001".' <<< "$output" ||
+  fail "check did not explain the folder: $output"
+job
+run "${private_settings[@]}"
+eventually 30 test -s "$state/fail.json" || fail "no failure reported"
+[ "$(jq -r .message "$state/fail.json")" = "$folder_message" ] || fail "unexpected failure: $(cat "$state/fail.json")"
+[ ! -e "$state/complete.json" ] || fail "the backup completed without the folder"
+logged 'msg="A folder cannot be read, so the backup fails." job=' || fail "the folder was not logged"
+logged "volume=private_data path=jane-doe" || fail "the folder was not logged with its path"
+stop
+pass "a folder the agent cannot read fails check and the backup, without its path in Backups"
+
+output=$(docker run --rm --user 10001:10001 "${private_settings[@]}" "$image" check) || fail "check failed as the app's user: $output"
+grep -qF "ok       Volume private_data: 1 file, 8 bytes." <<< "$output" || fail "check did not count the private file: $output"
+job
+run --user 10001:10001 "${private_settings[@]}"
+eventually 30 test -s "$state/complete.json" || fail "no complete as the app's user"
+eventually 10 logged 'msg="Backup sent."' || fail "Backups did not accept the totals"
+[ ! -e "$state/fail.json" ] || fail "unexpected failure: $(cat "$state/fail.json")"
+[ "$(tar -xOf "$state/stream.tar" volumes/private_data/jane-doe/receipt.pdf)" = receipt ] || fail "the private file is not in the archive"
+tar -tvf "$state/stream.tar" | grep -qE '^drwx------ 10001/10001 .* volumes/private_data/jane-doe/$' || fail "the folder lost its owner or mode"
+stop
+pass "as the app's user (user: 10001:10001), check and the backup read the private folder"
 
 echo "All tests passed."
