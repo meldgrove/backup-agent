@@ -120,7 +120,8 @@ level=INFO msg="Backup sent." job=4f0c… parts=4 bytes=61530112 duration=9s war
   Many apps keep files or folders that only their own user may read. Set
   `user:` of the `backup-agent` service to the app's user, such as
   `user: "10001:10001"`.
-- **A folder the agent cannot read or enter fails the backup**, because a backup
+- **A folder the agent cannot read fails the backup**, as does one whose
+  entries it cannot reach (listed but not entered), because a backup
   without it would look complete. Backups shows the volume and how to fix
   it, but not the folder's path: names of files and folders may hold
   personal data. The agent's log has the path.
