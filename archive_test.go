@@ -6,11 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -100,7 +103,7 @@ func TestArchiveLayout(t *testing.T) {
 
 	var out bytes.Buffer
 	logs := &lockedBuffer{}
-	a := &archive{tw: tar.NewWriter(&out), ctx: context.Background(), log: newLogger(logs, slog.LevelDebug, nil), open: openNoFollow}
+	a := &archive{tw: tar.NewWriter(&out), ctx: context.Background(), log: newLogger(logs, slog.LevelDebug, nil), readDir: os.ReadDir}
 	a.open = func(name string) (*os.File, error) {
 		if filepath.Base(name) == "secret.txt" {
 			return nil, os.ErrPermission
@@ -185,5 +188,68 @@ func TestArchiveStopsWhenWritingFails(t *testing.T) {
 	manifest := Manifest{Format: 1, CreatedAt: time.Now().UTC().Format(time.RFC3339), Volumes: []string{"files", "uploads"}}
 	if _, err := writeArchive(context.Background(), w, manifest, "", data, slog.New(slog.DiscardHandler)); !errors.Is(err, failure) {
 		t.Fatalf("writeArchive = %v, want the error of the writer", err)
+	}
+}
+
+// denyFolders makes readDir fail for the folders named in denied (by their
+// base name) with err, as for a folder of another user with mode 0700.
+func denyFolders(err syscall.Errno, denied ...string) func(string) ([]fs.DirEntry, error) {
+	return func(name string) ([]fs.DirEntry, error) {
+		if slices.Contains(denied, filepath.Base(name)) {
+			return nil, &fs.PathError{Op: "open", Path: name, Err: err}
+		}
+		return os.ReadDir(name)
+	}
+}
+
+func TestArchiveFailsOnAFolderItCannotRead(t *testing.T) {
+	data := t.TempDir()
+	writeFiles(t, filepath.Join(data, "files"), map[string]string{"a.txt": "a"})
+	writeFiles(t, filepath.Join(data, "private_data"), map[string]string{"jane-doe/receipt.pdf": "receipt", "public.txt": "public"})
+	owner := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	manifest := Manifest{Format: 1, CreatedAt: "2026-11-20T02:00:00Z", Volumes: []string{"files", "private_data"}}
+	cases := []struct{ denied, path, want string }{
+		{"jane-doe", "jane-doe", `A folder in the volume "private_data" cannot be read (permission denied). Run the agent as the app's user: set user: of the backup-agent service, such as "` + owner + `".`},
+		{"private_data", ".", `A folder in the volume "private_data" cannot be read (permission denied). Run the agent as the app's user: set user: of the backup-agent service, such as "` + owner + `".`},
+	}
+	for _, c := range cases {
+		var out bytes.Buffer
+		logs := &lockedBuffer{}
+		a := &archive{tw: tar.NewWriter(&out), ctx: context.Background(), log: newLogger(logs, slog.LevelDebug, nil),
+			open: openNoFollow, readDir: denyFolders(syscall.EACCES, c.denied)}
+		_, err := a.write(manifest, "", data)
+		var folder *folderError
+		if !errors.As(err, &folder) || err.Error() != c.want {
+			t.Errorf("%s: write = %v\nwant %s", c.denied, err, c.want)
+			continue
+		}
+		if got := failMessage(err.Error(), nil); got != c.want {
+			t.Errorf("%s: the message for Backups changed: %q", c.denied, got)
+		}
+		if !strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), "volume=private_data path="+c.path+" ") {
+			t.Errorf("%s: the folder was not logged with its path:\n%s", c.denied, logs)
+		}
+	}
+
+	// Another error than a permission: no hint about the user.
+	a := &archive{tw: tar.NewWriter(io.Discard), ctx: context.Background(), log: slog.New(slog.DiscardHandler),
+		open: openNoFollow, readDir: denyFolders(syscall.EIO, "jane-doe")}
+	if _, err := a.write(manifest, "", data); err == nil || err.Error() != `A folder in the volume "private_data" cannot be read (input/output error).` {
+		t.Errorf("EIO: write = %v", err)
+	}
+}
+
+func TestArchiveSkipsAFolderThatVanished(t *testing.T) {
+	data := t.TempDir()
+	writeFiles(t, filepath.Join(data, "files"), map[string]string{"gone/a.txt": "a", "b.txt": "b"})
+	var out bytes.Buffer
+	a := &archive{tw: tar.NewWriter(&out), ctx: context.Background(), log: slog.New(slog.DiscardHandler),
+		open: openNoFollow, readDir: denyFolders(syscall.ENOENT, "gone")}
+	warnings, err := a.write(Manifest{Format: 1, CreatedAt: "2026-11-20T02:00:00Z", Volumes: []string{"files"}}, "", data)
+	if err != nil || strings.Join(warnings, ";") != "1 file could not be read" {
+		t.Fatalf("write = %q, %v", warnings, err)
+	}
+	if got := strings.Join(names(readArchive(t, out.Bytes())), " "); got != "manifest.json volumes/files/ volumes/files/b.txt volumes/files/gone/" {
+		t.Errorf("entries %s", got)
 	}
 }

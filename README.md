@@ -102,11 +102,16 @@ level=INFO msg="Backup sent." job=4f0c… parts=4 bytes=61530112 duration=9s war
 - **Wrong settings:** the agent never exits because of a setting. It logs
   the problem once, stays idle and backs up nothing. So a wrong setting
   never makes an app update fail. `check` shows the problem and exits with 1.
-- **Files the agent cannot read** are skipped, logged with their path, and
+- **Run the agent as the app's user.** The image runs as `nobody` (65534).
+  Many apps keep files or folders that only their own user may read. Set
+  `user:` of the `backup-agent` service to the app's user, such as
+  `user: "10001:10001"`.
+- **A folder the agent cannot read fails the backup**, because a backup
+  without it would look complete. Backups shows the volume and how to fix
+  it, but not the folder's path: names of files and folders may hold
+  personal data. The agent's log has the path.
+- **A file the agent cannot read** is skipped, logged with its path, and
   reported to Backups as a warning, such as "2 files could not be read".
-  The agent runs as `nobody` (65534). If the app writes files that only its
-  own user may read, set `user:` of the `backup-agent` service to that user,
-  such as `user: "1000:1000"`.
 - **Consistency:** the database is dumped first, then the files are read.
   Files the dump refers to exist when they are read. The files are read
   while the app runs; a file that changes while it is read is counted as a
@@ -240,9 +245,15 @@ order:
    (byte) order. Directories, regular files and symbolic links (as links,
    never followed), with mode, numeric owner and modification time. Sockets,
    devices and FIFOs are skipped. A file that vanishes or cannot be read is
-   skipped and counted in a warning, logged with its path in the volume. A
-   file that shrinks or fails while it is read is filled up with zeros to the
-   size in its header, and counted in a warning.
+   skipped and counted in a warning, logged with its path in the volume. So
+   is a directory that vanishes. A file that shrinks or fails while it is
+   read is filled up with zeros to the size in its header, and counted in a
+   warning. A directory (the volume included) that cannot be listed for
+   another reason fails the job (`/fail`), with a message that names the
+   volume but not the path, such as: `A folder in the volume "private_data"
+   cannot be read (permission denied). Run the agent as the app's user: set
+   user: of the backup-agent service, such as "10001:10001".` The user is
+   the folder's owner. The agent logs the path.
 
 ### `PUT /jobs/{jobId}/parts/{n}`
 

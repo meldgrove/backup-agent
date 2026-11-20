@@ -51,9 +51,10 @@ type archive struct {
 	tw  *tar.Writer
 	ctx context.Context
 	log *slog.Logger
-	// open opens a regular file for reading without following a link; tests
-	// replace it to make a file unreadable.
+	// open opens a regular file for reading without following a link;
+	// readDir lists a folder. Tests replace them: root reads every file.
 	open       func(name string) (*os.File, error)
+	readDir    func(name string) ([]fs.DirEntry, error)
 	unreadable int
 	changed    int
 	special    int
@@ -65,10 +66,11 @@ func openNoFollow(name string) (*os.File, error) {
 }
 
 // writeArchive writes the whole archive to w. dumpPath is empty without a
-// database. Files that cannot be read are skipped and become warnings;
-// an error is returned only when writing to w fails or ctx ends.
+// database. Files that cannot be read are skipped and become warnings. An
+// error is returned when a folder cannot be read (*folderError), writing to
+// w fails, or ctx ends.
 func writeArchive(ctx context.Context, w io.Writer, manifest Manifest, dumpPath, dataDir string, log *slog.Logger) ([]string, error) {
-	a := &archive{tw: tar.NewWriter(w), ctx: ctx, log: log, open: openNoFollow}
+	a := &archive{tw: tar.NewWriter(w), ctx: ctx, log: log, open: openNoFollow, readDir: os.ReadDir}
 	return a.write(manifest, dumpPath, dataDir)
 }
 
@@ -147,21 +149,30 @@ func (a *archive) addDump(dumpPath string) error {
 // depth first, each directory's entries in lexical (byte) order.
 func (a *archive) addVolume(root, prefix string) error {
 	info, err := os.Lstat(root)
-	if err != nil || !info.IsDir() {
+	switch {
+	case errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()):
 		a.skip(prefix, ".", err)
 		return nil
+	case err != nil:
+		return a.unreadableFolder(prefix, "", nil, err)
 	}
 	if err := a.tw.WriteHeader(header(prefix+"/", info, tar.TypeDir, "")); err != nil {
 		return err
 	}
-	return a.addDirectory(root, prefix, prefix, "")
+	return a.addDirectory(root, prefix, prefix, "", info)
 }
 
-func (a *archive) addDirectory(dir, volume, name, rel string) error {
-	entries, err := os.ReadDir(dir) // sorted by name
-	if err != nil {
+// addDirectory adds what is below the directory dir (described by info). A
+// directory that vanished is skipped; one that cannot be listed fails the
+// job, since a backup without it would look complete.
+func (a *archive) addDirectory(dir, volume, name, rel string, info fs.FileInfo) error {
+	entries, err := a.readDir(dir) // sorted by name
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
 		a.skip(volume, orDefault(rel, "."), err)
 		return nil
+	case err != nil:
+		return a.unreadableFolder(volume, rel, info, err)
 	}
 	for _, entry := range entries {
 		if err := a.ctx.Err(); err != nil {
@@ -181,7 +192,7 @@ func (a *archive) addDirectory(dir, volume, name, rel string) error {
 			if err := a.tw.WriteHeader(header(childName+"/", info, tar.TypeDir, "")); err != nil {
 				return err
 			}
-			if err := a.addDirectory(full, volume, childName, childRel); err != nil {
+			if err := a.addDirectory(full, volume, childName, childRel, info); err != nil {
 				return err
 			}
 		case mode&fs.ModeSymlink != 0:
@@ -243,6 +254,60 @@ func (a *archive) addFile(full, volume, name, rel string) error {
 func (a *archive) skip(volume, rel string, err error) {
 	a.unreadable++
 	a.log.Warn("Skipped a file that cannot be read.", fileAttrs(volume, rel, err)...)
+}
+
+// unreadableFolder logs the folder with its path and returns the error that
+// fails the job.
+func (a *archive) unreadableFolder(volume, rel string, info fs.FileInfo, err error) error {
+	a.log.Error("A folder cannot be read, so the backup fails.", fileAttrs(volume, orDefault(rel, "."), err)...)
+	return &folderError{volume: path.Base(volume), owner: owner(info), err: err}
+}
+
+// folderError: a folder of a volume cannot be listed. Its message is for
+// Backups: it names the volume, never the path, because names of files and
+// folders may hold personal data.
+type folderError struct {
+	volume string
+	owner  string // "uid:gid" of the folder; "" when unknown
+	err    error
+}
+
+func (e *folderError) Error() string {
+	text := fmt.Sprintf("A folder in the volume %q cannot be read (%s).", e.volume, errorReason(e.err))
+	if errors.Is(e.err, fs.ErrPermission) {
+		text += " " + userHint(e.owner)
+	}
+	return text
+}
+
+// userHint tells how to let the agent read what the app's user owns.
+func userHint(owner string) string {
+	return fmt.Sprintf("Run the agent as the app's user: set user: of the backup-agent service, such as %q.", orDefault(owner, "1000:1000"))
+}
+
+// errorReason is the cause of a file system error without its path, such as
+// "permission denied".
+func errorReason(err error) string {
+	var errno syscall.Errno
+	var pathErr *fs.PathError
+	switch {
+	case errors.As(err, &errno):
+		return errno.Error()
+	case errors.As(err, &pathErr):
+		return pathErr.Err.Error()
+	}
+	return "unknown error"
+}
+
+// owner is "uid:gid" of a file, or "" when unknown.
+func owner(info fs.FileInfo) string {
+	if info == nil {
+		return ""
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		return fmt.Sprintf("%d:%d", stat.Uid, stat.Gid)
+	}
+	return ""
 }
 
 func (a *archive) change(volume, rel string, err error) {
