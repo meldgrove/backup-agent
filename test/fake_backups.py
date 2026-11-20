@@ -2,6 +2,7 @@
 """A fake Meldgrove Backups for test/run.sh: the agent protocol, version 1.
 
 Usage: fake_backups.py PORT STATE_DIR (the token comes from FAKE_TOKEN).
+It answers 400 to a poll whose app.secrets Backups would refuse.
 
 The state folder steers it and holds what it received:
   job          when present, the next poll that is no check hands out a job
@@ -16,6 +17,7 @@ The state folder steers it and holds what it received:
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -28,6 +30,14 @@ TOKEN = os.environ["FAKE_TOKEN"]
 PREFIX = "/api/agent/v1"
 lock = threading.Lock()
 jobs = {}
+SECRET_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,99}")
+
+
+def valid_poll(request):
+    """The poll body as Backups checks it; app.secrets defaults to []."""
+    secrets = request.get("app", {}).get("secrets", [])
+    return isinstance(secrets, list) and len(secrets) <= 20 and all(
+        isinstance(name, str) and SECRET_NAME.fullmatch(name) for name in secrets)
 
 
 def path(name):
@@ -94,6 +104,9 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["poll"]:
                 request = json.loads(body)
                 append("polls", json.dumps(request))
+                if not valid_poll(request):
+                    self.error(400, "invalid_request")
+                    return
                 job = None
                 if not request.get("check") and os.path.exists(path("job")):
                     with open(path("job"), encoding="utf-8") as f:

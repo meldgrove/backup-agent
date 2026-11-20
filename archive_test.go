@@ -6,11 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -94,13 +97,13 @@ func TestArchiveLayout(t *testing.T) {
 	}
 	version := "18.1"
 	manifest := Manifest{Format: 1, CreatedAt: "2026-11-20T02:00:00Z", Agent: AgentInfo{"0.1.0"},
-		App:      AppInfo{"handbook", "ghcr.io/meldgrove/handbook:0.3.1"},
+		App:      AppInfo{Name: "handbook", Image: "ghcr.io/meldgrove/handbook:0.3.1", Secrets: []string{"ENCRYPTION_KEY"}},
 		Database: ManifestDatabase{Included: true, File: dumpName, Format: "pg_dump custom", ServerVersion: &version},
 		Volumes:  volumes}
 
 	var out bytes.Buffer
 	logs := &lockedBuffer{}
-	a := &archive{tw: tar.NewWriter(&out), ctx: context.Background(), log: newLogger(logs, slog.LevelDebug, nil), open: openNoFollow}
+	a := &archive{tw: tar.NewWriter(&out), ctx: context.Background(), log: newLogger(logs, slog.LevelDebug, nil), readDir: os.ReadDir}
 	a.open = func(name string) (*os.File, error) {
 		if filepath.Base(name) == "secret.txt" {
 			return nil, os.ErrPermission
@@ -138,7 +141,7 @@ func TestArchiveLayout(t *testing.T) {
 	if err := json.Unmarshal([]byte(entries[0].content), &got); err != nil {
 		t.Fatalf("manifest.json: %v", err)
 	}
-	if got.Format != 1 || got.App.Name != "handbook" || !got.Database.Included || *got.Database.ServerVersion != "18.1" || len(got.Volumes) != 2 {
+	if got.Format != 1 || got.App.Name != "handbook" || strings.Join(got.App.Secrets, ",") != "ENCRYPTION_KEY" || !got.Database.Included || *got.Database.ServerVersion != "18.1" || len(got.Volumes) != 2 {
 		t.Errorf("manifest %+v", got)
 	}
 	if e := byName["db.dump"]; e.content != "PGDMP fake dump" || e.mode != 0o600 {
@@ -185,5 +188,121 @@ func TestArchiveStopsWhenWritingFails(t *testing.T) {
 	manifest := Manifest{Format: 1, CreatedAt: time.Now().UTC().Format(time.RFC3339), Volumes: []string{"files", "uploads"}}
 	if _, err := writeArchive(context.Background(), w, manifest, "", data, slog.New(slog.DiscardHandler)); !errors.Is(err, failure) {
 		t.Fatalf("writeArchive = %v, want the error of the writer", err)
+	}
+}
+
+// denyFolders makes readDir fail for the folders named in denied (by their
+// base name) with err, as for a folder of another user with mode 0700.
+func denyFolders(err syscall.Errno, denied ...string) func(string) ([]fs.DirEntry, error) {
+	return func(name string) ([]fs.DirEntry, error) {
+		if slices.Contains(denied, filepath.Base(name)) {
+			return nil, &fs.PathError{Op: "open", Path: name, Err: err}
+		}
+		return os.ReadDir(name)
+	}
+}
+
+func TestArchiveFailsOnAFolderItCannotRead(t *testing.T) {
+	data := t.TempDir()
+	writeFiles(t, filepath.Join(data, "files"), map[string]string{"a.txt": "a"})
+	writeFiles(t, filepath.Join(data, "private_data"), map[string]string{"jane-doe/receipt.pdf": "receipt", "public.txt": "public"})
+	owner := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	manifest := Manifest{Format: 1, CreatedAt: "2026-11-20T02:00:00Z", Volumes: []string{"files", "private_data"}}
+	cases := []struct{ denied, path, want string }{
+		{"jane-doe", "jane-doe", `A folder in the volume "private_data" cannot be read (permission denied). Run the agent as the app's user: set user: of the backup-agent service, such as "` + owner + `".`},
+		{"private_data", ".", `A folder in the volume "private_data" cannot be read (permission denied). Run the agent as the app's user: set user: of the backup-agent service, such as "` + owner + `".`},
+	}
+	for _, c := range cases {
+		var out bytes.Buffer
+		logs := &lockedBuffer{}
+		a := &archive{tw: tar.NewWriter(&out), ctx: context.Background(), log: newLogger(logs, slog.LevelDebug, nil),
+			open: openNoFollow, readDir: denyFolders(syscall.EACCES, c.denied)}
+		_, err := a.write(manifest, "", data)
+		var folder *folderError
+		if !errors.As(err, &folder) || err.Error() != c.want {
+			t.Errorf("%s: write = %v\nwant %s", c.denied, err, c.want)
+			continue
+		}
+		if got := failMessage(err.Error(), nil); got != c.want {
+			t.Errorf("%s: the message for Backups changed: %q", c.denied, got)
+		}
+		if !strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), "volume=private_data path="+c.path+" ") {
+			t.Errorf("%s: the folder was not logged with its path:\n%s", c.denied, logs)
+		}
+	}
+
+	// Another error than a permission: no hint about the user.
+	a := &archive{tw: tar.NewWriter(io.Discard), ctx: context.Background(), log: slog.New(slog.DiscardHandler),
+		open: openNoFollow, readDir: denyFolders(syscall.EIO, "jane-doe")}
+	if _, err := a.write(manifest, "", data); err == nil || err.Error() != `A folder in the volume "private_data" cannot be read (input/output error).` {
+		t.Errorf("EIO: write = %v", err)
+	}
+}
+
+func TestArchiveSkipsAFolderThatVanished(t *testing.T) {
+	data := t.TempDir()
+	writeFiles(t, filepath.Join(data, "files"), map[string]string{"gone/a.txt": "a", "b.txt": "b"})
+	var out bytes.Buffer
+	a := &archive{tw: tar.NewWriter(&out), ctx: context.Background(), log: slog.New(slog.DiscardHandler),
+		open: openNoFollow, readDir: denyFolders(syscall.ENOENT, "gone")}
+	warnings, err := a.write(Manifest{Format: 1, CreatedAt: "2026-11-20T02:00:00Z", Volumes: []string{"files"}}, "", data)
+	if err != nil || strings.Join(warnings, ";") != "1 file could not be read" {
+		t.Fatalf("write = %q, %v", warnings, err)
+	}
+	if got := strings.Join(names(readArchive(t, out.Bytes())), " "); got != "manifest.json volumes/files/ volumes/files/b.txt volumes/files/gone/" {
+		t.Errorf("entries %s", got)
+	}
+}
+
+func TestCheckSummarizesAVolume(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "private_data")
+	writeFiles(t, root, map[string]string{"a.txt": "aaa", "docs/b.md": strings.Repeat("b", 2000), "latest": "->docs/b.md",
+		"outside": "->/etc", "secret.txt": "s", "jane-doe/receipt.pdf": "r", "john-doe/receipt.pdf": "r", "empty/": ""})
+	if err := syscall.Mkfifo(filepath.Join(root, "pipe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	owner := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	hint := ` Run the agent as the app's user: set user: of the backup-agent service, such as "` + owner + `".`
+	denyFiles := func(denied ...string) func(string) (*os.File, error) {
+		return func(name string) (*os.File, error) {
+			if slices.Contains(denied, filepath.Base(name)) {
+				return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.EACCES}
+			}
+			return openNoFollow(name)
+		}
+	}
+	cases := []struct {
+		open        func(string) (*os.File, error)
+		readDir     func(string) ([]fs.DirEntry, error)
+		label, text string
+	}{
+		{openNoFollow, os.ReadDir, "ok", "Volume private_data: 5 files, 2.0 kB."},
+		{denyFiles("secret.txt"), os.ReadDir, "warning",
+			`Volume private_data: 4 files, 2.0 kB. Backups skip a file that cannot be read: "secret.txt" (permission denied).` + hint},
+		{denyFiles("secret.txt", "b.md"), os.ReadDir, "warning",
+			`Volume private_data: 3 files, 5 bytes. Backups skip 2 files that cannot be read, such as "docs/b.md" (permission denied).` + hint},
+		{denyFiles("secret.txt"), denyFolders(syscall.EACCES, "jane-doe"), "problem",
+			`Volume private_data: backups fail. A folder cannot be read: "jane-doe" (permission denied). They would also skip a file that cannot be read: "secret.txt" (permission denied).` + hint},
+		{openNoFollow, denyFolders(syscall.EACCES, "jane-doe", "john-doe"), "problem",
+			`Volume private_data: backups fail. 2 folders cannot be read, such as "jane-doe" (permission denied).` + hint},
+		{openNoFollow, denyFolders(syscall.EACCES, "private_data"), "problem",
+			`Volume private_data: backups fail. A folder cannot be read: "." (permission denied).` + hint},
+		{openNoFollow, denyFolders(syscall.ENOENT, "jane-doe"), "ok", "Volume private_data: 4 files, 2.0 kB."},
+	}
+	for i, c := range cases {
+		walk := &archive{ctx: context.Background(), open: c.open, readDir: c.readDir}
+		summary, err := walk.summarize(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if label, text := describeVolume("private_data", summary); label != c.label || text != c.text {
+			t.Errorf("case %d: %s %s\nwant %s %s", i, label, text, c.label, c.text)
+		}
+	}
+	if summary, err := (&archive{ctx: context.Background()}).summarize(filepath.Join(root, "missing")); err != nil || summary != (volumeSummary{}) {
+		t.Errorf("a missing volume: %+v, %v", summary, err)
+	}
+	if got := formatBytes(12_400_000); got != "12.4 MB" {
+		t.Errorf("formatBytes = %q", got)
 	}
 }

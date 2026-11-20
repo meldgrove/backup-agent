@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,7 +14,7 @@ import (
 
 func TestPollSendsTheAppAndItsVolumes(t *testing.T) {
 	f := newFakeBackups(t)
-	agent, _, _ := testAgent(t, f, map[string]string{"DATABASE_URL": "postgres://app:pw@db/app"})
+	agent, _, _ := testAgent(t, f, map[string]string{"DATABASE_URL": "postgres://app:pw@db/app", "APP_SECRETS": " ENCRYPTION_KEY, AUTH_SECRET,,ENCRYPTION_KEY"})
 	writeFiles(t, agent.cfg.DataDir, map[string]string{"uploads/a": "a", "files/b": "b", "stray": "x"})
 	answer, err := agent.client.Poll(context.Background(), agent.pollRequest(false))
 	if err != nil {
@@ -24,9 +25,23 @@ func TestPollSendsTheAppAndItsVolumes(t *testing.T) {
 	}
 	got := f.polls[0]
 	if got.Agent.Version != "0.1.0" || got.App.Name != "handbook" || got.App.Image != "ghcr.io/meldgrove/handbook:0.3.1" ||
+		strings.Join(got.App.Secrets, ",") != "ENCRYPTION_KEY,AUTH_SECRET" ||
 		!got.Database || strings.Join(got.Volumes, ",") != "files,uploads" || got.Check {
 		t.Errorf("poll body %+v", got)
 	}
+
+	// Without APP_SECRETS: "secrets": [], also in a Config made by hand.
+	for _, agent := range []*Agent{testAgentOnly(t, f), {cfg: Config{}}} {
+		body, err := json.Marshal(agent.pollRequest(false))
+		if err != nil || !strings.Contains(string(body), `"app":{"name":"`) || !strings.Contains(string(body), `,"secrets":[]},`) {
+			t.Errorf("poll body %s, %v", body, err)
+		}
+	}
+}
+
+func testAgentOnly(t *testing.T, f *fakeBackups) *Agent {
+	agent, _, _ := testAgent(t, f, nil)
+	return agent
 }
 
 func TestPollWithAWrongToken(t *testing.T) {
@@ -140,7 +155,8 @@ func TestJobSendsPartsInOrderAndCompletes(t *testing.T) {
 	if got := strings.Join(names(entries), " "); got != want {
 		t.Errorf("entries %s", got)
 	}
-	if !strings.Contains(entries[0].content, `"createdAt": "2026-11-20T02:00:00Z"`) || !strings.Contains(entries[0].content, `"included": false`) {
+	if !strings.Contains(entries[0].content, `"createdAt": "2026-11-20T02:00:00Z"`) || !strings.Contains(entries[0].content, `"included": false`) ||
+		!strings.Contains(entries[0].content, `"secrets": []`) {
 		t.Errorf("manifest:\n%s", entries[0].content)
 	}
 	if len(f.complete.Warnings) != 0 || f.complete.Warnings == nil {
@@ -372,7 +388,7 @@ cp `+fixture+` "$file"`)
 	if code := agent.Check(context.Background(), &out); code != 0 {
 		t.Errorf("exit %d:\n%s", code, out.String())
 	}
-	for _, want := range []string{"ok       Volumes in ", ": files\n", "ok       pg_dump (PostgreSQL) 18.7\n", "ok       Database: answers (PostgreSQL 18.7).\n",
+	for _, want := range []string{"ok       Volumes in ", ": files\n", "ok       Volume files: 1 file, 1 byte.\n", "ok       pg_dump (PostgreSQL) 18.7\n", "ok       Database: answers (PostgreSQL 18.7).\n",
 		`ok       Backups: answers, as the source "Handbook"; the agent asks every 30 s.`} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("no %q in:\n%s", want, out.String())

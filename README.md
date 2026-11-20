@@ -18,30 +18,38 @@ Backups: checks the totals ─► restic snapshot
 
 The agent only reads. It restores nothing, opens no port, needs no Docker
 socket, and only connects out to Backups. It is one Go program without
-dependencies, plus `pg_dump` 18, and runs as `nobody`.
+dependencies, plus `pg_dump` 18. It runs as `nobody`, or as the app's user
+(`user:`).
 
 ## Settings
 
 Add the service to the app's `compose.yaml`:
 
 ```yaml
-x-image: &image ghcr.io/meldgrove/handbook:${HANDBOOK_VERSION:?Set HANDBOOK_VERSION}
+x-image: &image ghcr.io/meldgrove/helpdesk:${HELPDESK_VERSION:?Set HELPDESK_VERSION}
 
 services:
   backup-agent:
     image: ghcr.io/meldgrove/backup-agent:0.1
     restart: unless-stopped
+    # The app's user (uid:gid), so that the agent reads what the app writes.
+    # Helpdesk runs as node, 1000:1000. Without it: nobody (65534).
+    user: "1000:1000"
     environment:
       # Both from the app's source in Meldgrove Backups. Empty: the agent idles.
       BACKUP_URL: ${BACKUP_URL:-}
       BACKUP_TOKEN: ${BACKUP_TOKEN:-}
       # The same database the app uses.
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
-      APP_NAME: handbook
+      APP_NAME: helpdesk
       APP_IMAGE: *image
+      # The app's settings that a restore needs and that are not in the
+      # backup, such as keys that encrypt stored data: names only, never
+      # values. Each app's compose.yaml names its own.
+      APP_SECRETS: ENCRYPTION_KEY
     volumes:
       # Each volume of the app, read-only, below /data.
-      - files:/data/files:ro
+      - attachments:/data/attachments:ro
 ```
 
 The agent needs no port and none of the app's other settings. Give it only
@@ -53,8 +61,9 @@ The agent needs no port and none of the app's other settings. Give it only
 | `BACKUP_TOKEN` | empty | The token Backups shows once when an admin adds the app as a source (`mgb_` and 43 more characters). Needed when `BACKUP_URL` is set. |
 | `DATABASE_URL` | empty | The app's PostgreSQL URL (`postgres://` or `postgresql://`). Empty: no database in the backups. |
 | `BACKUP_DATA_DIR` | `/data` | Each directory directly below it is one volume. Missing or empty: no files in the backups. |
-| `APP_NAME` | empty | The app, such as `handbook`; shown in Backups. |
+| `APP_NAME` | empty | The app, such as `helpdesk`; shown in Backups. |
 | `APP_IMAGE` | empty | The app's image and tag; shown in Backups and stored in the archive. |
+| `APP_SECRETS` | empty | Names of the app's settings that a restore needs and that are not in the backup, separated by commas, such as `ENCRYPTION_KEY,AUTH_SECRET`. Names only, never values: each a letter or `_`, then letters, digits or `_`, at most 100 characters; spaces around them and repeated names are dropped, the order is kept, and at most 20 different names. Sent to Backups and stored in the archive. |
 | `BACKUP_TMP_DIR` | `/tmp` | Where the database dump waits until it is sent. Needs room for one dump. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 
@@ -80,18 +89,23 @@ docker compose exec backup-agent backup-agent check
 ```text
 Meldgrove Backup Agent 0.1.0
 ok       The settings are valid.
-ok       Volumes in /data: files
+ok       Volumes in /data: attachments
+ok       Volume attachments: 1204 files, 3.1 GB.
 ok       Temporary folder /tmp: writable, 12.4 GB free; it needs room for one dump.
 ok       pg_dump (PostgreSQL) 18.7
 ok       Database: answers (PostgreSQL 18.1).
-ok       Backups: answers, as the source "Handbook"; the agent asks every 60 s.
+ok       Backups: answers, as the source "Helpdesk"; the agent asks every 60 s.
 ```
 
-It dumps only the schema to test the database, and runs no backup. The log
+It walks each volume as a backup would, links not followed, and opens each
+file without reading it. A folder it cannot read is a problem (the backup
+would fail); a file it cannot read is a warning (the backup would skip it).
+Both lines name the path and the `user:` to set. It dumps only the schema to
+test the database, and runs no backup. The log
 (`docker compose logs backup-agent`) shows each backup:
 
 ```text
-level=INFO msg="Connected to Backups." source=Handbook poll=1m0s
+level=INFO msg="Connected to Backups." source=Helpdesk poll=1m0s
 level=INFO msg="Backup started." job=4f0c… partBytes=16777216
 level=INFO msg="Database dumped." job=4f0c… bytes=48211337 duration=3s serverVersion=18.1
 level=INFO msg="Backup sent." job=4f0c… parts=4 bytes=61530112 duration=9s warnings=""
@@ -99,11 +113,20 @@ level=INFO msg="Backup sent." job=4f0c… parts=4 bytes=61530112 duration=9s war
 
 ## Good to know
 
-- **Files the agent cannot read** are skipped, logged with their path, and
+- **Wrong settings:** the agent never exits because of a setting. It logs
+  the problem once, stays idle and backs up nothing. So a wrong setting
+  never makes an app update fail. `check` shows the problem and exits with 1.
+- **Run the agent as the app's user.** The image runs as `nobody` (65534).
+  Many apps keep files or folders that only their own user may read. Set
+  `user:` of the `backup-agent` service to the app's user, such as
+  `user: "10001:10001"`.
+- **A folder the agent cannot read fails the backup**, as does one whose
+  entries it cannot reach (listed but not entered), because a backup
+  without it would look complete. Backups shows the volume and how to fix
+  it, but not the folder's path: names of files and folders may hold
+  personal data. The agent's log has the path.
+- **A file the agent cannot read** is skipped, logged with its path, and
   reported to Backups as a warning, such as "2 files could not be read".
-  The agent runs as `nobody` (65534). If the app writes files that only its
-  own user may read, set `user:` of the `backup-agent` service to that user,
-  such as `user: "1000:1000"`.
 - **Consistency:** the database is dumped first, then the files are read.
   Files the dump refers to exist when they are read. The files are read
   while the app runs; a file that changes while it is read is counted as a
@@ -118,7 +141,9 @@ level=INFO msg="Backup sent." job=4f0c… parts=4 bytes=61530112 duration=9s war
 ## Restore
 
 A restore is done by hand. Backups keeps each backup as the file
-`/backup.tar` of a restic snapshot.
+`/backup.tar` of a restic snapshot. These are the generic steps. The app's
+own deployment guide may require more; for example, Reimbursements keeps
+its web service stopped and runs purges after a restore.
 
 ```sh
 restic dump <snapshot> /backup.tar > backup.tar
@@ -139,14 +164,18 @@ tar -xf backup.tar          # manifest.json, db.dump, volumes/<name>/…
    modes, for example:
 
    ```sh
-   docker run --rm -v "$PWD/volumes/files:/from:ro" -v <project>_files:/to alpine cp -a /from/. /to/
+   docker run --rm -v "$PWD/volumes/attachments:/from:ro" -v <project>_attachments:/to alpine cp -a /from/. /to/
    ```
 
-4. Start the app: `docker compose up -d`.
+4. The settings that `APP_SECRETS` names (`app.secrets` in
+   `manifest.json`) are not in the backup. Take them from the app's `.env`,
+   kept apart from the backup. Without them, the app cannot use what they
+   protect, such as credentials it stores encrypted.
+5. Start the app: `docker compose up -d`.
 
-`manifest.json` names the app, its image and the PostgreSQL version of the
-backup. Restore into the same app version, or a newer one that migrates the
-database at its start.
+`manifest.json` names the app, its image, the settings in `APP_SECRETS` and
+the PostgreSQL version of the backup. Restore into the same app version, or
+a newer one that migrates the database at its start.
 
 ## Protocol
 
@@ -181,19 +210,22 @@ The heartbeat and the job pickup:
 ```json
 {
   "agent": { "version": "0.1.0" },
-  "app": { "name": "handbook", "image": "ghcr.io/meldgrove/handbook:0.3.1" },
+  "app": { "name": "helpdesk", "image": "ghcr.io/meldgrove/helpdesk:0.3.1", "secrets": ["ENCRYPTION_KEY"] },
   "database": true,
-  "volumes": ["files"]
+  "volumes": ["attachments"]
 }
 ```
 
-`database` is true when `DATABASE_URL` is set. `volumes` names the
-directories below `BACKUP_DATA_DIR`, sorted. The `check` command adds
-`"check": true`: Backups then answers as usual but hands out no job.
+`app.secrets` holds the names of `APP_SECRETS`, `[]` when it is empty: at
+most 20 names that match `^[A-Za-z_][A-Za-z0-9_]{0,99}$`. Older agents do
+not send it; Backups then takes `[]`. `database` is true when
+`DATABASE_URL` is set. `volumes` names the directories below
+`BACKUP_DATA_DIR`, sorted. The `check` command adds `"check": true`:
+Backups then answers as usual but hands out no job.
 
 ```json
 {
-  "source": { "id": "uuid", "name": "Handbook" },
+  "source": { "id": "uuid", "name": "Helpdesk" },
   "pollSeconds": 60,
   "job": null
 }
@@ -220,14 +252,15 @@ order:
      "format": 1,
      "createdAt": "2026-11-20T02:00:00Z",
      "agent": { "version": "0.1.0" },
-     "app": { "name": "handbook", "image": "ghcr.io/meldgrove/handbook:0.3.1" },
+     "app": { "name": "helpdesk", "image": "ghcr.io/meldgrove/helpdesk:0.3.1", "secrets": ["ENCRYPTION_KEY"] },
      "database": { "included": true, "file": "db.dump", "format": "pg_dump custom", "serverVersion": "18.1" },
-     "volumes": ["files"]
+     "volumes": ["attachments"]
    }
    ```
 
    Without a database: `"database": { "included": false }`. `serverVersion`
-   is `""` when the dump does not name it.
+   is `""` when the dump does not name it. `app.secrets` is as in the poll;
+   archives of older agents lack it.
 2. `db.dump`, when `DATABASE_URL` is set: `pg_dump --format=custom
    --compress=0` of `DATABASE_URL` (its password in `PGPASSWORD`), written to
    `BACKUP_TMP_DIR` first and deleted after the job. It is uncompressed, so
@@ -237,9 +270,16 @@ order:
    (byte) order. Directories, regular files and symbolic links (as links,
    never followed), with mode, numeric owner and modification time. Sockets,
    devices and FIFOs are skipped. A file that vanishes or cannot be read is
-   skipped and counted in a warning, logged with its path in the volume. A
-   file that shrinks or fails while it is read is filled up with zeros to the
-   size in its header, and counted in a warning.
+   skipped and counted in a warning, logged with its path in the volume. So
+   is a directory that vanishes. A file that shrinks or fails while it is
+   read is filled up with zeros to the size in its header, and counted in a
+   warning. A directory (the volume included) that cannot be listed for
+   another reason, or whose entries cannot be looked at (listed but not
+   entered), fails the job (`/fail`), with a message that names the
+   volume but not the path, such as: `A folder in the volume "private_data"
+   cannot be read (permission denied). Run the agent as the app's user: set
+   user: of the backup-agent service, such as "10001:10001".` The user is
+   the folder's owner. The agent logs the path.
 
 ### `PUT /jobs/{jobId}/parts/{n}`
 
@@ -319,6 +359,14 @@ every Meldgrove project shares: patch, minor or major from the latest `vX.Y.Z`
 tag, an image for amd64 and arm64 as `X.Y.Z`, `X.Y`, from 1.0.0 also `X`, and
 `latest`, and a GitHub Release. Below 1.0.0, patch is for everything that
 operators need not act on, features included, and minor only for a release
-that operators must act on; label such a pull request `breaking`. Apps refer
-to `ghcr.io/meldgrove/backup-agent:0.1`, so patch releases reach them with
-their next deploy.
+that operators must act on; label such a pull request `breaking`.
+
+Apps refer to `ghcr.io/meldgrove/backup-agent:0.1`. A patch release reaches
+an installation only when it pulls the image again; `docker compose up`
+pulls only missing images:
+
+- On Coolify (`pull_policy: always`), each deploy pulls it.
+- On a server, host setups written by an updater release newer than 0.2.1
+  pull the agent's image with each app update. After updating the updater,
+  run the host setup again.
+- Otherwise: `docker compose pull backup-agent && docker compose up -d`.

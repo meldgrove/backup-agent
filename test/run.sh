@@ -25,12 +25,16 @@ work=$(mktemp -d)
 state=$work/state
 files=$work/data/files
 uploads=$work/data/uploads
-mkdir -p "$state" "$files/docs" "$files/empty" "$uploads" "$work/out"
+private=$work/private
+mkdir -p "$state" "$files/docs" "$files/empty" "$uploads" "$work/out" "$private"
 server=""
 
+# as_root <command...>: runs a command of the image as root, with $private at /v.
+as_root() { docker run --rm --user 0 --entrypoint "$1" --volume "$private:/v" "$image" "${@:2}"; }
 cleanup() {
   docker rm --force backup-agent-test backup-agent-test-db > /dev/null 2>&1 || true
   [ -z "$server" ] || kill "$server" 2> /dev/null || true
+  as_root rm -rf /v/jane-doe > /dev/null 2>&1 || true
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -56,6 +60,7 @@ sql() { docker exec backup-agent-test-db psql --username postgres --dbname "$1" 
 agent_settings=(--network host
   --env "BACKUP_URL=http://127.0.0.1:$server_port" --env "BACKUP_TOKEN=$token"
   --env APP_NAME=handbook --env APP_IMAGE=ghcr.io/meldgrove/handbook:0.3.1
+  --env "APP_SECRETS= ENCRYPTION_KEY, AUTH_SECRET,,ENCRYPTION_KEY"
   --volume "$files:/data/files:ro" --volume "$uploads:/data/uploads:ro")
 run() { docker run --detach --name backup-agent-test "$@" "$image" > /dev/null; }
 # Stops the agent; fails unless it exits with 0 within 10 seconds.
@@ -102,12 +107,25 @@ fi
 docker run --rm --entrypoint pg_dump "$image" --version | grep -q '(PostgreSQL) 18\.' || fail "the image has no pg_dump 18"
 pass "runs as nobody, with pg_dump 18"
 
-# Misconfiguration ends the agent with a message, without the secret.
-output=$(docker run --rm --env BACKUP_URL=https://backups.example.org "$image" 2>&1) && fail "started without BACKUP_TOKEN"
+# A wrong setting: check explains it and exits with 1, without the secret.
+output=$(docker run --rm --env BACKUP_URL=https://backups.example.org "$image" check 2>&1) && fail "check passed without BACKUP_TOKEN"
 grep -q BACKUP_TOKEN <<< "$output" || fail "no word about BACKUP_TOKEN: $output"
-output=$(docker run --rm --env "DATABASE_URL=mysql://app:$password@db/app" "$image" 2>&1) && fail "took a MySQL URL"
+output=$(docker run --rm --env "DATABASE_URL=mysql://app:$password@db/app" "$image" check 2>&1) && fail "check took a MySQL URL"
+grep -q DATABASE_URL <<< "$output" || fail "no word about DATABASE_URL: $output"
 ! grep -qF "$password" <<< "$output" || fail "the error shows the password: $output"
-pass "refuses a missing token and a URL that is no PostgreSQL URL, without showing it"
+pass "check refuses a missing token and a URL that is no PostgreSQL URL, without showing it"
+
+# The agent itself never exits on a wrong setting (an app update would roll
+# back): it logs it once, stays up without asking Backups, and stops with 0.
+run "${agent_settings[@]}" --env "DATABASE_URL=mysql://app:$password@db/app"
+eventually 10 logged "DATABASE_URL must start with" || fail "no message about DATABASE_URL"
+sleep 2
+[ "$(docker inspect --format '{{.State.Running}}' backup-agent-test)" = true ] || fail "the agent exited on a wrong setting"
+[ "$(docker logs backup-agent-test 2>&1 | wc -l)" = 1 ] || fail "the agent logged more than the setting: $(docker logs backup-agent-test 2>&1)"
+! leaks || fail "the log shows the password or the token"
+stop
+[ ! -e "$state/requests" ] || fail "the agent asked Backups with a wrong setting"
+pass "a wrong setting leaves the agent idle, without requests; it stops with exit code 0"
 
 # Without BACKUP_URL the agent is idle, and stops at once.
 run
@@ -119,17 +137,20 @@ pass "idle without BACKUP_URL, stops with exit code 0"
 # check: settings, volumes, pg_dump, the database and Backups; takes no job.
 job
 output=$(docker run --rm "${agent_settings[@]}" --env "DATABASE_URL=$database_url" "$image" check) || fail "check failed: $output"
-for want in "Volumes in /data: files, uploads" "pg_dump (PostgreSQL) 18." "Database: answers (PostgreSQL 18." 'Backups: answers, as the source "Handbook"'; do
+for want in "ok       Volumes in /data: files, uploads" \
+  'warning  Volume files: 3 files, 300.0 kB. Backups skip a file that cannot be read: "private.txt" (permission denied).' \
+  "ok       Volume uploads: 1 file, 7 bytes." "pg_dump (PostgreSQL) 18." "Database: answers (PostgreSQL 18." 'Backups: answers, as the source "Handbook"'; do
   grep -qF "$want" <<< "$output" || fail "check did not print '$want': $output"
 done
 [ -e "$state/job" ] || fail "check took the job"
-tail -n 1 "$state/polls" | jq -e '.check == true and .database == true and .volumes == ["files", "uploads"]' > /dev/null ||
+tail -n 1 "$state/polls" | jq -e '.check == true and .database == true and .volumes == ["files", "uploads"] and
+  .app.secrets == ["ENCRYPTION_KEY", "AUTH_SECRET"]' > /dev/null ||
   fail "unexpected poll of check: $(tail -n 1 "$state/polls")"
 output=$(docker run --rm "${agent_settings[@]}" --env "DATABASE_URL=${database_url/$password/wrong-password}" "$image" check) &&
   fail "check passed with a wrong password"
 grep -q "problem  Database: pg_dump failed: .*password authentication failed" <<< "$output" || fail "check did not explain: $output"
 ! grep -qF wrong-password <<< "$output" || fail "check shows the password: $output"
-pass "check reports the volumes, pg_dump, the database and Backups, and takes no job"
+pass "check reports the volumes and their files, pg_dump, the database and Backups, and takes no job"
 
 # A backup: parts of 64 KiB, with a lost part, a lost answer and a damaged part on the way.
 printf '1 500\n2 store-500\n3 422\n' > "$state/faults"
@@ -169,7 +190,7 @@ done
 cmp "$uploads/photo.jpg" "$work/out/volumes/uploads/photo.jpg" || fail "photo.jpg differs"
 jq -e --arg version "$version" '.format == 1 and (.createdAt | test("^[0-9-]{10}T[0-9:]{8}Z$")) and
   ($version == "" or .agent.version == $version) and
-  .app == {"name": "handbook", "image": "ghcr.io/meldgrove/handbook:0.3.1"} and
+  .app == {"name": "handbook", "image": "ghcr.io/meldgrove/handbook:0.3.1", "secrets": ["ENCRYPTION_KEY", "AUTH_SECRET"]} and
   .database.included and .database.file == "db.dump" and .database.format == "pg_dump custom" and
   (.database.serverVersion | test("^18\\.[0-9]+$")) and .volumes == ["files", "uploads"]' "$work/out/manifest.json" > /dev/null ||
   fail "unexpected manifest: $(cat "$work/out/manifest.json")"
@@ -202,5 +223,52 @@ stop
 eventually 5 test -s "$state/fail.json" || fail "no failure reported"
 [ "$(jq -r .message "$state/fail.json")" = "The agent was stopped" ] || fail "unexpected failure: $(cat "$state/fail.json")"
 pass "a stopped agent reports the job as failed"
+
+# Reimbursements: the app (uid 10001) keeps private folders (mode 0700). As
+# nobody the agent cannot list them: check reports a problem, and the backup
+# fails, naming the volume but not the folder. As the app's user both work.
+as_root sh -c 'mkdir /v/jane-doe && echo receipt > /v/jane-doe/receipt.pdf &&
+  chown -R 10001:10001 /v/jane-doe && chmod 700 /v/jane-doe && chmod 600 /v/jane-doe/receipt.pdf'
+chmod a+rX "$private"
+private_settings=("${agent_settings[@]}" --volume "$private:/data/private_data:ro")
+folder_message='A folder in the volume "private_data" cannot be read (permission denied). Run the agent as the app'"'"'s user: set user: of the backup-agent service, such as "10001:10001".'
+output=$(docker run --rm "${private_settings[@]}" "$image" check) && fail "check passed with a folder it cannot read: $output"
+grep -qF 'problem  Volume private_data: backups fail. A folder cannot be read: "jane-doe" (permission denied). Run the agent as the app'"'"'s user: set user: of the backup-agent service, such as "10001:10001".' <<< "$output" ||
+  fail "check did not explain the folder: $output"
+job
+run "${private_settings[@]}"
+eventually 30 test -s "$state/fail.json" || fail "no failure reported"
+[ "$(jq -r .message "$state/fail.json")" = "$folder_message" ] || fail "unexpected failure: $(cat "$state/fail.json")"
+[ ! -e "$state/complete.json" ] || fail "the backup completed without the folder"
+logged 'msg="A folder cannot be read, so the backup fails." job=' || fail "the folder was not logged"
+logged "volume=private_data path=jane-doe" || fail "the folder was not logged with its path"
+stop
+pass "a folder the agent cannot read fails check and the backup, without its path in Backups"
+
+output=$(docker run --rm --user 10001:10001 "${private_settings[@]}" "$image" check) || fail "check failed as the app's user: $output"
+grep -qF "ok       Volume private_data: 1 file, 8 bytes." <<< "$output" || fail "check did not count the private file: $output"
+job
+run --user 10001:10001 "${private_settings[@]}"
+eventually 30 test -s "$state/complete.json" || fail "no complete as the app's user"
+eventually 10 logged 'msg="Backup sent."' || fail "Backups did not accept the totals"
+[ ! -e "$state/fail.json" ] || fail "unexpected failure: $(cat "$state/fail.json")"
+[ "$(tar -xOf "$state/stream.tar" volumes/private_data/jane-doe/receipt.pdf)" = receipt ] || fail "the private file is not in the archive"
+tar -tvf "$state/stream.tar" | grep -qE '^drwx------ 10001/10001 .* volumes/private_data/jane-doe/$' || fail "the folder lost its owner or mode"
+stop
+pass "as the app's user (user: 10001:10001), check and the backup read the private folder"
+
+# A folder that others may list but not enter (0744): its names show, but
+# nothing in it can be read. That fails too, rather than a warning per file.
+as_root chmod 744 /v/jane-doe
+output=$(docker run --rm "${private_settings[@]}" "$image" check) && fail "check passed with a folder it cannot enter: $output"
+grep -qF 'problem  Volume private_data: backups fail. A folder cannot be read: "jane-doe" (permission denied).' <<< "$output" ||
+  fail "check did not explain the folder it cannot enter: $output"
+job
+run "${private_settings[@]}"
+eventually 30 test -s "$state/fail.json" || fail "no failure reported for a folder the agent cannot enter"
+[ "$(jq -r .message "$state/fail.json")" = "$folder_message" ] || fail "unexpected failure: $(cat "$state/fail.json")"
+[ ! -e "$state/complete.json" ] || fail "the backup completed without the folder's files"
+stop
+pass "a folder the agent may list but not enter fails check and the backup"
 
 echo "All tests passed."

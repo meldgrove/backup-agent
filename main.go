@@ -7,6 +7,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -18,40 +20,50 @@ const usage = `Usage: backup-agent [command]
   version   print the agent's version`
 
 func main() {
-	os.Exit(run(os.Args[1:]))
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	code := run(ctx, os.Args[1:], os.Getenv, os.Stdout, os.Stderr)
+	stop()
+	os.Exit(code)
 }
 
-func run(args []string) int {
+// run runs a command until it is done or ctx ends (SIGTERM, SIGINT).
+func run(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
 	command := ""
 	if len(args) > 0 {
 		command = args[0]
 	}
 	switch {
 	case len(args) > 1:
-		fmt.Fprintln(os.Stderr, usage)
+		fmt.Fprintln(stderr, usage)
 		return 2
 	case command == "version":
-		fmt.Println(version())
+		fmt.Fprintln(stdout, version())
 		return 0
 	case command == "-h", command == "--help", command == "help":
-		fmt.Println(usage)
+		fmt.Fprintln(stdout, usage)
 		return 0
 	case command != "" && command != "check":
-		fmt.Fprintln(os.Stderr, usage)
+		fmt.Fprintln(stderr, usage)
 		return 2
 	}
 
-	cfg, err := LoadConfig(os.Getenv)
+	cfg, err := LoadConfig(getenv)
 	if err != nil {
-		newLogger(os.Stderr, 0, cfg.Secrets()).Error(err.Error())
-		return 1
+		log := newLogger(stderr, slog.LevelInfo, cfg.Secrets())
+		if command == "check" {
+			log.Error(err.Error())
+			return 1
+		}
+		// The agent never exits on a wrong setting: an app update runs
+		// docker compose up --wait and rolls back when a service exits.
+		log.Error(err.Error() + " The agent is idle and backs up nothing until the setting is fixed.")
+		<-ctx.Done()
+		return 0
 	}
-	log := newLogger(os.Stderr, cfg.LogLevel, cfg.Secrets())
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
+	log := newLogger(stderr, cfg.LogLevel, cfg.Secrets())
 	agent := NewAgent(cfg, log)
 	if command == "check" {
-		return agent.Check(ctx, os.Stdout)
+		return agent.Check(ctx, stdout)
 	}
 	return agent.Run(ctx)
 }

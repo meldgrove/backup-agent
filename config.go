@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -19,13 +20,20 @@ type Config struct {
 	DataDir     string // BACKUP_DATA_DIR: every directory below it is a volume
 	AppName     string
 	AppImage    string
-	TmpDir      string // BACKUP_TMP_DIR: where the dump waits until it is sent
+	AppSecrets  []string // APP_SECRETS: names of settings a restore needs that are not in the backup
+	TmpDir      string   // BACKUP_TMP_DIR: where the dump waits until it is sent
 	LogLevel    slog.Level
 	Version     string // the agent's own version (APP_VERSION of the image)
 }
 
 // tokenPattern: what Backups shows once when an admin adds the source.
 var tokenPattern = regexp.MustCompile(`^mgb_[A-Za-z0-9_-]{43}$`)
+
+// secretNamePattern is one name in APP_SECRETS; Backups takes the same, and
+// at most maxAppSecrets of them.
+var secretNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,99}$`)
+
+const maxAppSecrets = 20
 
 // LoadConfig reads the environment. getenv is os.Getenv outside tests. Its
 // errors never contain BACKUP_TOKEN or DATABASE_URL.
@@ -78,7 +86,33 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 			return c, fmt.Errorf("%s must be one line of at most 200 characters.", name)
 		}
 	}
+	secrets, err := parseAppSecrets(getenv("APP_SECRETS"))
+	if err != nil {
+		return c, err
+	}
+	c.AppSecrets = secrets
 	return c, nil
+}
+
+// parseAppSecrets reads APP_SECRETS: names separated by commas, without
+// spaces, empty entries and repeats. Its errors never show the value, which
+// may hold a secret by mistake.
+func parseAppSecrets(value string) ([]string, error) {
+	names := []string{}
+	for _, name := range strings.Split(value, ",") {
+		name = strings.TrimSpace(name)
+		switch {
+		case name == "" || slices.Contains(names, name):
+			continue
+		case !secretNamePattern.MatchString(name):
+			return []string{}, errors.New("APP_SECRETS must name the app's settings, separated by commas, such as ENCRYPTION_KEY,AUTH_SECRET: names only, never values. A name starts with a letter or _, then has letters, digits or _, at most 100 characters.")
+		}
+		names = append(names, name)
+	}
+	if len(names) > maxAppSecrets {
+		return []string{}, fmt.Errorf("APP_SECRETS must name at most %d settings.", maxAppSecrets)
+	}
+	return names, nil
 }
 
 // Secrets are the values that never reach a log or Backups: the token, the
