@@ -18,7 +18,8 @@ Backups: checks the totals ─► restic snapshot
 
 The agent only reads. It restores nothing, opens no port, needs no Docker
 socket, and only connects out to Backups. It is one Go program without
-dependencies, plus `pg_dump` 18, and runs as `nobody`.
+dependencies, plus `pg_dump` 18. It runs as `nobody`, or as the app's user
+(`user:`).
 
 ## Settings
 
@@ -31,6 +32,9 @@ services:
   backup-agent:
     image: ghcr.io/meldgrove/backup-agent:0.1
     restart: unless-stopped
+    # The app's user (uid:gid), so that the agent reads what the app writes.
+    # Handbook runs as node, 1000:1000. Without it: nobody (65534).
+    user: "1000:1000"
     environment:
       # Both from the app's source in Meldgrove Backups. Empty: the agent idles.
       BACKUP_URL: ${BACKUP_URL:-}
@@ -136,7 +140,9 @@ level=INFO msg="Backup sent." job=4f0c… parts=4 bytes=61530112 duration=9s war
 ## Restore
 
 A restore is done by hand. Backups keeps each backup as the file
-`/backup.tar` of a restic snapshot.
+`/backup.tar` of a restic snapshot. These are the generic steps. The app's
+own deployment guide may require more; for example, Reimbursements keeps
+its web service stopped and runs purges after a restore.
 
 ```sh
 restic dump <snapshot> /backup.tar > backup.tar
@@ -160,11 +166,15 @@ tar -xf backup.tar          # manifest.json, db.dump, volumes/<name>/…
    docker run --rm -v "$PWD/volumes/files:/from:ro" -v <project>_files:/to alpine cp -a /from/. /to/
    ```
 
-4. Start the app: `docker compose up -d`.
+4. The settings that `APP_SECRETS` names (`app.secrets` in
+   `manifest.json`) are not in the backup. Take them from the app's `.env`,
+   kept apart from the backup. Without them, the app cannot use what they
+   protect, such as credentials it stores encrypted.
+5. Start the app: `docker compose up -d`.
 
-`manifest.json` names the app, its image and the PostgreSQL version of the
-backup. Restore into the same app version, or a newer one that migrates the
-database at its start.
+`manifest.json` names the app, its image, the settings in `APP_SECRETS` and
+the PostgreSQL version of the backup. Restore into the same app version, or
+a newer one that migrates the database at its start.
 
 ## Protocol
 
@@ -347,6 +357,14 @@ every Meldgrove project shares: patch, minor or major from the latest `vX.Y.Z`
 tag, an image for amd64 and arm64 as `X.Y.Z`, `X.Y`, from 1.0.0 also `X`, and
 `latest`, and a GitHub Release. Below 1.0.0, patch is for everything that
 operators need not act on, features included, and minor only for a release
-that operators must act on; label such a pull request `breaking`. Apps refer
-to `ghcr.io/meldgrove/backup-agent:0.1`, so patch releases reach them with
-their next deploy.
+that operators must act on; label such a pull request `breaking`.
+
+Apps refer to `ghcr.io/meldgrove/backup-agent:0.1`. A patch release reaches
+an installation only when it pulls the image again; `docker compose up`
+pulls only missing images:
+
+- On Coolify (`pull_policy: always`), each deploy pulls it.
+- On a server, host setups written by an updater release newer than 0.2.1
+  pull the agent's image with each app update. After updating the updater,
+  run the host setup again.
+- Otherwise: `docker compose pull backup-agent && docker compose up -d`.
