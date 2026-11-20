@@ -26,14 +26,14 @@ dependencies, plus `pg_dump` 18. It runs as `nobody`, or as the app's user
 Add the service to the app's `compose.yaml`:
 
 ```yaml
-x-image: &image ghcr.io/meldgrove/handbook:${HANDBOOK_VERSION:?Set HANDBOOK_VERSION}
+x-image: &image ghcr.io/meldgrove/helpdesk:${HELPDESK_VERSION:?Set HELPDESK_VERSION}
 
 services:
   backup-agent:
     image: ghcr.io/meldgrove/backup-agent:0.1
     restart: unless-stopped
     # The app's user (uid:gid), so that the agent reads what the app writes.
-    # Handbook runs as node, 1000:1000. Without it: nobody (65534).
+    # Helpdesk runs as node, 1000:1000. Without it: nobody (65534).
     user: "1000:1000"
     environment:
       # Both from the app's source in Meldgrove Backups. Empty: the agent idles.
@@ -41,15 +41,15 @@ services:
       BACKUP_TOKEN: ${BACKUP_TOKEN:-}
       # The same database the app uses.
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
-      APP_NAME: handbook
+      APP_NAME: helpdesk
       APP_IMAGE: *image
       # The app's settings that a restore needs and that are not in the
       # backup, such as keys that encrypt stored data: names only, never
       # values. Each app's compose.yaml names its own.
-      APP_SECRETS: ENCRYPTION_KEY,AUTH_SECRET
+      APP_SECRETS: ENCRYPTION_KEY
     volumes:
       # Each volume of the app, read-only, below /data.
-      - files:/data/files:ro
+      - attachments:/data/attachments:ro
 ```
 
 The agent needs no port and none of the app's other settings. Give it only
@@ -61,7 +61,7 @@ The agent needs no port and none of the app's other settings. Give it only
 | `BACKUP_TOKEN` | empty | The token Backups shows once when an admin adds the app as a source (`mgb_` and 43 more characters). Needed when `BACKUP_URL` is set. |
 | `DATABASE_URL` | empty | The app's PostgreSQL URL (`postgres://` or `postgresql://`). Empty: no database in the backups. |
 | `BACKUP_DATA_DIR` | `/data` | Each directory directly below it is one volume. Missing or empty: no files in the backups. |
-| `APP_NAME` | empty | The app, such as `handbook`; shown in Backups. |
+| `APP_NAME` | empty | The app, such as `helpdesk`; shown in Backups. |
 | `APP_IMAGE` | empty | The app's image and tag; shown in Backups and stored in the archive. |
 | `APP_SECRETS` | empty | Names of the app's settings that a restore needs and that are not in the backup, separated by commas, such as `ENCRYPTION_KEY,AUTH_SECRET`. Names only, never values: at most 20, each a letter or `_`, then letters, digits or `_`, at most 100 characters. Sent to Backups and stored in the archive. |
 | `BACKUP_TMP_DIR` | `/tmp` | Where the database dump waits until it is sent. Needs room for one dump. |
@@ -89,12 +89,12 @@ docker compose exec backup-agent backup-agent check
 ```text
 Meldgrove Backup Agent 0.1.0
 ok       The settings are valid.
-ok       Volumes in /data: files
-ok       Volume files: 1204 files, 3.1 GB.
+ok       Volumes in /data: attachments
+ok       Volume attachments: 1204 files, 3.1 GB.
 ok       Temporary folder /tmp: writable, 12.4 GB free; it needs room for one dump.
 ok       pg_dump (PostgreSQL) 18.7
 ok       Database: answers (PostgreSQL 18.1).
-ok       Backups: answers, as the source "Handbook"; the agent asks every 60 s.
+ok       Backups: answers, as the source "Helpdesk"; the agent asks every 60 s.
 ```
 
 It walks each volume as a backup would, links not followed, and opens each
@@ -105,7 +105,7 @@ test the database, and runs no backup. The log
 (`docker compose logs backup-agent`) shows each backup:
 
 ```text
-level=INFO msg="Connected to Backups." source=Handbook poll=1m0s
+level=INFO msg="Connected to Backups." source=Helpdesk poll=1m0s
 level=INFO msg="Backup started." job=4f0c… partBytes=16777216
 level=INFO msg="Database dumped." job=4f0c… bytes=48211337 duration=3s serverVersion=18.1
 level=INFO msg="Backup sent." job=4f0c… parts=4 bytes=61530112 duration=9s warnings=""
@@ -163,7 +163,7 @@ tar -xf backup.tar          # manifest.json, db.dump, volumes/<name>/…
    modes, for example:
 
    ```sh
-   docker run --rm -v "$PWD/volumes/files:/from:ro" -v <project>_files:/to alpine cp -a /from/. /to/
+   docker run --rm -v "$PWD/volumes/attachments:/from:ro" -v <project>_attachments:/to alpine cp -a /from/. /to/
    ```
 
 4. The settings that `APP_SECRETS` names (`app.secrets` in
@@ -209,9 +209,9 @@ The heartbeat and the job pickup:
 ```json
 {
   "agent": { "version": "0.1.0" },
-  "app": { "name": "handbook", "image": "ghcr.io/meldgrove/handbook:0.3.1", "secrets": ["ENCRYPTION_KEY"] },
+  "app": { "name": "helpdesk", "image": "ghcr.io/meldgrove/helpdesk:0.3.1", "secrets": ["ENCRYPTION_KEY"] },
   "database": true,
-  "volumes": ["files"]
+  "volumes": ["attachments"]
 }
 ```
 
@@ -224,7 +224,7 @@ Backups then answers as usual but hands out no job.
 
 ```json
 {
-  "source": { "id": "uuid", "name": "Handbook" },
+  "source": { "id": "uuid", "name": "Helpdesk" },
   "pollSeconds": 60,
   "job": null
 }
@@ -251,9 +251,9 @@ order:
      "format": 1,
      "createdAt": "2026-11-20T02:00:00Z",
      "agent": { "version": "0.1.0" },
-     "app": { "name": "handbook", "image": "ghcr.io/meldgrove/handbook:0.3.1", "secrets": ["ENCRYPTION_KEY"] },
+     "app": { "name": "helpdesk", "image": "ghcr.io/meldgrove/helpdesk:0.3.1", "secrets": ["ENCRYPTION_KEY"] },
      "database": { "included": true, "file": "db.dump", "format": "pg_dump custom", "serverVersion": "18.1" },
-     "volumes": ["files"]
+     "volumes": ["attachments"]
    }
    ```
 
