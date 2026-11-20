@@ -81,13 +81,18 @@ docker compose exec backup-agent backup-agent check
 Meldgrove Backup Agent 0.1.0
 ok       The settings are valid.
 ok       Volumes in /data: files
+ok       Volume files: 1204 files, 3.1 GB.
 ok       Temporary folder /tmp: writable, 12.4 GB free; it needs room for one dump.
 ok       pg_dump (PostgreSQL) 18.7
 ok       Database: answers (PostgreSQL 18.1).
 ok       Backups: answers, as the source "Handbook"; the agent asks every 60 s.
 ```
 
-It dumps only the schema to test the database, and runs no backup. The log
+It walks each volume as a backup would, links not followed, and opens each
+file without reading it. A folder it cannot read is a problem (the backup
+would fail); a file it cannot read is a warning (the backup would skip it).
+Both lines name the path and the `user:` to set. It dumps only the schema to
+test the database, and runs no backup. The log
 (`docker compose logs backup-agent`) shows each backup:
 
 ```text

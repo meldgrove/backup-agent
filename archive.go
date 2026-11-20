@@ -215,6 +215,79 @@ func (a *archive) addDirectory(dir, volume, name, rel string, info fs.FileInfo) 
 	return nil
 }
 
+// volumeSummary is what a backup would hold of one volume.
+type volumeSummary struct {
+	files   int   // regular files that open
+	bytes   int64 // their size
+	skipped int   // regular files that do not open: skipped, a warning
+	folders int   // folders that cannot be listed: the backup fails
+	// The first skipped file and the first folder that cannot be listed:
+	// the path in the volume, the owner and the error.
+	skippedPath, skippedOwner string
+	skippedErr                error
+	folderPath, folderOwner   string
+	folderErr                 error
+}
+
+// summarize walks the volume root as addVolume does, without following
+// links, and opens each regular file without reading it.
+func (a *archive) summarize(root string) (volumeSummary, error) {
+	var s volumeSummary
+	info, err := os.Lstat(root)
+	switch {
+	case errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()):
+		return s, nil
+	case err != nil:
+		s.folders, s.folderPath, s.folderErr = 1, ".", err
+		return s, nil
+	}
+	return s, a.summarizeDirectory(&s, root, "", info)
+}
+
+func (a *archive) summarizeDirectory(s *volumeSummary, dir, rel string, info fs.FileInfo) error {
+	entries, err := a.readDir(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		if s.folders++; s.folders == 1 {
+			s.folderPath, s.folderOwner, s.folderErr = orDefault(rel, "."), owner(info), err
+		}
+		return nil
+	}
+	for _, entry := range entries {
+		if err := a.ctx.Err(); err != nil {
+			return err
+		}
+		full := filepath.Join(dir, entry.Name())
+		childRel := path.Join(rel, entry.Name())
+		info, err := os.Lstat(full)
+		if err == nil && info.IsDir() {
+			if err := a.summarizeDirectory(s, full, childRel, info); err != nil {
+				return err
+			}
+			continue
+		}
+		if err == nil && !info.Mode().IsRegular() {
+			continue // links, sockets, devices, FIFOs
+		}
+		var f *os.File
+		if err == nil {
+			f, err = a.open(full)
+		}
+		if err != nil {
+			if s.skipped++; s.skipped == 1 {
+				s.skippedPath, s.skippedOwner, s.skippedErr = childRel, owner(info), err
+			}
+			continue
+		}
+		f.Close()
+		s.files++
+		s.bytes += info.Size()
+	}
+	return nil
+}
+
 // addFile adds a regular file. One that cannot be opened is skipped; one
 // that shrinks or fails while it is read is filled up with zeros (the tar
 // header already holds its size) and counted as changed.

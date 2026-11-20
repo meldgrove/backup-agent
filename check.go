@@ -2,19 +2,23 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 )
 
 // Check tests what a backup needs and prints one line per item: the
-// volumes, the temporary folder, pg_dump, the database and Backups. It
-// returns 1 when anything is wrong. It runs no job: it polls with
-// "check": true, and fails a job that a Backups hands out anyway.
+// volumes (each walked, its files opened but not read), the temporary
+// folder, pg_dump, the database and Backups. It returns 1 when anything is
+// wrong. It runs no job: it polls with "check": true, and fails a job that
+// a Backups hands out anyway.
 func (a *Agent) Check(ctx context.Context, out io.Writer) int {
 	problems := 0
 	line := func(label, text string) {
@@ -33,6 +37,15 @@ func (a *Agent) Check(ctx context.Context, out io.Writer) int {
 		line("note", f("Volumes: none in %s; the backups hold no files.", a.cfg.DataDir))
 	} else {
 		line("ok", f("Volumes in %s: %s", a.cfg.DataDir, strings.Join(volumes, ", ")))
+		for _, volume := range volumes {
+			walk := &archive{ctx: ctx, open: openNoFollow, readDir: os.ReadDir}
+			summary, err := walk.summarize(filepath.Join(a.cfg.DataDir, volume))
+			if err != nil {
+				line("problem", f("Volume %s: %v", volume, err))
+				break
+			}
+			line(describeVolume(volume, summary))
+		}
 	}
 
 	tmpOK := false
@@ -79,6 +92,46 @@ func (a *Agent) Check(ctx context.Context, out io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// describeVolume is the line of check for one volume: a problem when a
+// folder cannot be read, a warning when files cannot be read.
+func describeVolume(volume string, s volumeSummary) (string, string) {
+	held := fmt.Sprintf("Volume %s: %s, %s.", volume, plural(s.files, "file", "files"), formatBytes(s.bytes))
+	which := func(n int, one, many, path string, err error) string {
+		if n == 1 {
+			return fmt.Sprintf("%s: %q (%s).", one, path, errorReason(err))
+		}
+		return fmt.Sprintf("%d %s, such as %q (%s).", n, many, path, errorReason(err))
+	}
+	hint := func(owner string, err error) string {
+		if errors.Is(err, fs.ErrPermission) {
+			return " " + userHint(owner)
+		}
+		return ""
+	}
+	switch {
+	case s.folders > 0:
+		return "problem", fmt.Sprintf("Volume %s: backups fail. ", volume) +
+			which(s.folders, "A folder cannot be read", "folders cannot be read", s.folderPath, s.folderErr) + hint(s.folderOwner, s.folderErr)
+	case s.skipped > 0:
+		return "warning", held + " Backups skip " +
+			which(s.skipped, "a file that cannot be read", "files that cannot be read", s.skippedPath, s.skippedErr) + hint(s.skippedOwner, s.skippedErr)
+	}
+	return "ok", held
+}
+
+// formatBytes is a size in decimal units, such as "12.4 MB".
+func formatBytes(n int64) string {
+	for _, unit := range []struct {
+		size float64
+		name string
+	}{{1e12, "TB"}, {1e9, "GB"}, {1e6, "MB"}, {1e3, "kB"}} {
+		if float64(n) >= unit.size {
+			return fmt.Sprintf("%.1f %s", float64(n)/unit.size, unit.name)
+		}
+	}
+	return plural(int(n), "byte", "bytes")
 }
 
 // checkDatabase dumps only the schema, into the temporary folder.

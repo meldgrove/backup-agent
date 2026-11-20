@@ -132,7 +132,9 @@ pass "idle without BACKUP_URL, stops with exit code 0"
 # check: settings, volumes, pg_dump, the database and Backups; takes no job.
 job
 output=$(docker run --rm "${agent_settings[@]}" --env "DATABASE_URL=$database_url" "$image" check) || fail "check failed: $output"
-for want in "Volumes in /data: files, uploads" "pg_dump (PostgreSQL) 18." "Database: answers (PostgreSQL 18." 'Backups: answers, as the source "Handbook"'; do
+for want in "ok       Volumes in /data: files, uploads" \
+  'warning  Volume files: 3 files, 300.0 kB. Backups skip a file that cannot be read: "private.txt" (permission denied).' \
+  "ok       Volume uploads: 1 file, 7 bytes." "pg_dump (PostgreSQL) 18." "Database: answers (PostgreSQL 18." 'Backups: answers, as the source "Handbook"'; do
   grep -qF "$want" <<< "$output" || fail "check did not print '$want': $output"
 done
 [ -e "$state/job" ] || fail "check took the job"
@@ -142,7 +144,7 @@ output=$(docker run --rm "${agent_settings[@]}" --env "DATABASE_URL=${database_u
   fail "check passed with a wrong password"
 grep -q "problem  Database: pg_dump failed: .*password authentication failed" <<< "$output" || fail "check did not explain: $output"
 ! grep -qF wrong-password <<< "$output" || fail "check shows the password: $output"
-pass "check reports the volumes, pg_dump, the database and Backups, and takes no job"
+pass "check reports the volumes and their files, pg_dump, the database and Backups, and takes no job"
 
 # A backup: parts of 64 KiB, with a lost part, a lost answer and a damaged part on the way.
 printf '1 500\n2 store-500\n3 422\n' > "$state/faults"

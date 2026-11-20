@@ -372,7 +372,7 @@ cp `+fixture+` "$file"`)
 	if code := agent.Check(context.Background(), &out); code != 0 {
 		t.Errorf("exit %d:\n%s", code, out.String())
 	}
-	for _, want := range []string{"ok       Volumes in ", ": files\n", "ok       pg_dump (PostgreSQL) 18.7\n", "ok       Database: answers (PostgreSQL 18.7).\n",
+	for _, want := range []string{"ok       Volumes in ", ": files\n", "ok       Volume files: 1 file, 1 byte.\n", "ok       pg_dump (PostgreSQL) 18.7\n", "ok       Database: answers (PostgreSQL 18.7).\n",
 		`ok       Backups: answers, as the source "Handbook"; the agent asks every 30 s.`} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("no %q in:\n%s", want, out.String())

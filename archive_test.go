@@ -253,3 +253,56 @@ func TestArchiveSkipsAFolderThatVanished(t *testing.T) {
 		t.Errorf("entries %s", got)
 	}
 }
+
+func TestCheckSummarizesAVolume(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "private_data")
+	writeFiles(t, root, map[string]string{"a.txt": "aaa", "docs/b.md": strings.Repeat("b", 2000), "latest": "->docs/b.md",
+		"outside": "->/etc", "secret.txt": "s", "jane-doe/receipt.pdf": "r", "john-doe/receipt.pdf": "r", "empty/": ""})
+	if err := syscall.Mkfifo(filepath.Join(root, "pipe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	owner := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	hint := ` Run the agent as the app's user: set user: of the backup-agent service, such as "` + owner + `".`
+	denyFiles := func(denied ...string) func(string) (*os.File, error) {
+		return func(name string) (*os.File, error) {
+			if slices.Contains(denied, filepath.Base(name)) {
+				return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.EACCES}
+			}
+			return openNoFollow(name)
+		}
+	}
+	cases := []struct {
+		open        func(string) (*os.File, error)
+		readDir     func(string) ([]fs.DirEntry, error)
+		label, text string
+	}{
+		{openNoFollow, os.ReadDir, "ok", "Volume private_data: 5 files, 2.0 kB."},
+		{denyFiles("secret.txt"), os.ReadDir, "warning",
+			`Volume private_data: 4 files, 2.0 kB. Backups skip a file that cannot be read: "secret.txt" (permission denied).` + hint},
+		{denyFiles("secret.txt", "b.md"), os.ReadDir, "warning",
+			`Volume private_data: 3 files, 5 bytes. Backups skip 2 files that cannot be read, such as "docs/b.md" (permission denied).` + hint},
+		{denyFiles("secret.txt"), denyFolders(syscall.EACCES, "jane-doe"), "problem",
+			`Volume private_data: backups fail. A folder cannot be read: "jane-doe" (permission denied).` + hint},
+		{openNoFollow, denyFolders(syscall.EACCES, "jane-doe", "john-doe"), "problem",
+			`Volume private_data: backups fail. 2 folders cannot be read, such as "jane-doe" (permission denied).` + hint},
+		{openNoFollow, denyFolders(syscall.EACCES, "private_data"), "problem",
+			`Volume private_data: backups fail. A folder cannot be read: "." (permission denied).` + hint},
+		{openNoFollow, denyFolders(syscall.ENOENT, "jane-doe"), "ok", "Volume private_data: 4 files, 2.0 kB."},
+	}
+	for i, c := range cases {
+		walk := &archive{ctx: context.Background(), open: c.open, readDir: c.readDir}
+		summary, err := walk.summarize(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if label, text := describeVolume("private_data", summary); label != c.label || text != c.text {
+			t.Errorf("case %d: %s %s\nwant %s %s", i, label, text, c.label, c.text)
+		}
+	}
+	if summary, err := (&archive{ctx: context.Background()}).summarize(filepath.Join(root, "missing")); err != nil || summary != (volumeSummary{}) {
+		t.Errorf("a missing volume: %+v, %v", summary, err)
+	}
+	if got := formatBytes(12_400_000); got != "12.4 MB" {
+		t.Errorf("formatBytes = %q", got)
+	}
+}
