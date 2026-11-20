@@ -99,6 +99,9 @@ level=INFO msg="Backup sent." job=4f0c… parts=4 bytes=61530112 duration=9s war
 
 ## Good to know
 
+- **Wrong settings:** the agent never exits because of a setting. It logs
+  the problem once, stays idle and backs up nothing. So a wrong setting
+  never makes an app update fail. `check` shows the problem and exits with 1.
 - **Files the agent cannot read** are skipped, logged with their path, and
   reported to Backups as a warning, such as "2 files could not be read".
   The agent runs as `nobody` (65534). If the app writes files that only its

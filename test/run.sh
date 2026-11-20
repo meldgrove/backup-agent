@@ -102,12 +102,25 @@ fi
 docker run --rm --entrypoint pg_dump "$image" --version | grep -q '(PostgreSQL) 18\.' || fail "the image has no pg_dump 18"
 pass "runs as nobody, with pg_dump 18"
 
-# Misconfiguration ends the agent with a message, without the secret.
-output=$(docker run --rm --env BACKUP_URL=https://backups.example.org "$image" 2>&1) && fail "started without BACKUP_TOKEN"
+# A wrong setting: check explains it and exits with 1, without the secret.
+output=$(docker run --rm --env BACKUP_URL=https://backups.example.org "$image" check 2>&1) && fail "check passed without BACKUP_TOKEN"
 grep -q BACKUP_TOKEN <<< "$output" || fail "no word about BACKUP_TOKEN: $output"
-output=$(docker run --rm --env "DATABASE_URL=mysql://app:$password@db/app" "$image" 2>&1) && fail "took a MySQL URL"
+output=$(docker run --rm --env "DATABASE_URL=mysql://app:$password@db/app" "$image" check 2>&1) && fail "check took a MySQL URL"
+grep -q DATABASE_URL <<< "$output" || fail "no word about DATABASE_URL: $output"
 ! grep -qF "$password" <<< "$output" || fail "the error shows the password: $output"
-pass "refuses a missing token and a URL that is no PostgreSQL URL, without showing it"
+pass "check refuses a missing token and a URL that is no PostgreSQL URL, without showing it"
+
+# The agent itself never exits on a wrong setting (an app update would roll
+# back): it logs it once, stays up without asking Backups, and stops with 0.
+run "${agent_settings[@]}" --env "DATABASE_URL=mysql://app:$password@db/app"
+eventually 10 logged "DATABASE_URL must start with" || fail "no message about DATABASE_URL"
+sleep 2
+[ "$(docker inspect --format '{{.State.Running}}' backup-agent-test)" = true ] || fail "the agent exited on a wrong setting"
+[ "$(docker logs backup-agent-test 2>&1 | wc -l)" = 1 ] || fail "the agent logged more than the setting: $(docker logs backup-agent-test 2>&1)"
+! leaks || fail "the log shows the password or the token"
+stop
+[ ! -e "$state/requests" ] || fail "the agent asked Backups with a wrong setting"
+pass "a wrong setting leaves the agent idle, without requests; it stops with exit code 0"
 
 # Without BACKUP_URL the agent is idle, and stops at once.
 run
