@@ -1,0 +1,132 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/url"
+	"os"
+	"regexp"
+	"sort"
+	"strings"
+)
+
+// Config is the agent's environment (README.md, "Settings").
+type Config struct {
+	URL         string // BACKUP_URL without a trailing slash; empty: idle
+	Token       string // BACKUP_TOKEN
+	DatabaseURL string // DATABASE_URL; empty: no database dump
+	DataDir     string // BACKUP_DATA_DIR: every directory below it is a volume
+	AppName     string
+	AppImage    string
+	TmpDir      string // BACKUP_TMP_DIR: where the dump waits until it is sent
+	LogLevel    slog.Level
+	Version     string // the agent's own version (APP_VERSION of the image)
+}
+
+// tokenPattern: what Backups shows once when an admin adds the source.
+var tokenPattern = regexp.MustCompile(`^mgb_[A-Za-z0-9_-]{43}$`)
+
+// LoadConfig reads the environment. getenv is os.Getenv outside tests. Its
+// errors never contain BACKUP_TOKEN or DATABASE_URL.
+func LoadConfig(getenv func(string) string) (Config, error) {
+	c := Config{
+		URL:         strings.TrimRight(strings.TrimSpace(getenv("BACKUP_URL")), "/"),
+		Token:       getenv("BACKUP_TOKEN"),
+		DatabaseURL: getenv("DATABASE_URL"),
+		DataDir:     orDefault(getenv("BACKUP_DATA_DIR"), "/data"),
+		AppName:     getenv("APP_NAME"),
+		AppImage:    getenv("APP_IMAGE"),
+		TmpDir:      orDefault(getenv("BACKUP_TMP_DIR"), "/tmp"),
+		Version:     orDefault(getenv("APP_VERSION"), "development"),
+	}
+	switch strings.ToLower(orDefault(getenv("LOG_LEVEL"), "info")) {
+	case "debug":
+		c.LogLevel = slog.LevelDebug
+	case "info":
+		c.LogLevel = slog.LevelInfo
+	case "warn":
+		c.LogLevel = slog.LevelWarn
+	case "error":
+		c.LogLevel = slog.LevelError
+	default:
+		return c, errors.New("LOG_LEVEL must be debug, info, warn or error.")
+	}
+	if c.URL != "" {
+		u, err := url.Parse(c.URL)
+		switch {
+		case err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "":
+			return c, errors.New("BACKUP_URL must be the address of Meldgrove Backups, such as https://backups.example.org.")
+		case u.User != nil:
+			return c, errors.New("BACKUP_URL must not contain a user or password; the agent signs in with BACKUP_TOKEN.")
+		case u.RawQuery != "" || u.Fragment != "":
+			return c, errors.New("BACKUP_URL must not contain a query or fragment, such as ?a=b or #top.")
+		}
+		if c.Token == "" {
+			return c, errors.New("Set BACKUP_TOKEN to the token that Backups showed when the app was added as a source.")
+		}
+		if !tokenPattern.MatchString(c.Token) {
+			return c, errors.New("BACKUP_TOKEN is not a token of Meldgrove Backups: it starts with mgb_ and has 47 characters, without spaces or quotes.")
+		}
+	}
+	if c.DatabaseURL != "" && !strings.HasPrefix(c.DatabaseURL, "postgres://") && !strings.HasPrefix(c.DatabaseURL, "postgresql://") {
+		return c, errors.New("DATABASE_URL must start with postgres:// or postgresql://.")
+	}
+	for name, value := range map[string]string{"APP_NAME": c.AppName, "APP_IMAGE": c.AppImage} {
+		if len(value) > 200 || strings.ContainsFunc(value, func(r rune) bool { return r < 32 || r == 127 }) {
+			return c, fmt.Errorf("%s must be one line of at most 200 characters.", name)
+		}
+	}
+	return c, nil
+}
+
+// Secrets are the values that never reach a log or Backups: the token, the
+// database URL and its password, longest first.
+func (c Config) Secrets() []string {
+	var secrets []string
+	add := func(s string) {
+		if s != "" {
+			secrets = append(secrets, s)
+		}
+	}
+	add(c.Token)
+	add(c.DatabaseURL)
+	if c.DatabaseURL != "" {
+		_, password := splitPassword(c.DatabaseURL)
+		add(password)
+		// The password as it is written in the URL, perhaps percent-encoded.
+		if m := rawPasswordPattern.FindStringSubmatch(c.DatabaseURL); m != nil {
+			add(m[1])
+		}
+	}
+	sort.SliceStable(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	return secrets
+}
+
+var rawPasswordPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://[^:@/?#]*:([^@/?#]+)@`)
+
+// listVolumes names the directories directly below dir, sorted. A missing
+// dir has none.
+func listVolumes(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return []string{}, nil
+	}
+	if err != nil {
+		return []string{}, fmt.Errorf("BACKUP_DATA_DIR cannot be read: %w", err)
+	}
+	volumes := []string{}
+	for _, entry := range entries { // os.ReadDir sorts by name
+		if entry.IsDir() {
+			volumes = append(volumes, entry.Name())
+		}
+	}
+	return volumes, nil
+}
+
+func orDefault(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
