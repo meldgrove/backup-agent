@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Lint, unit and end-to-end tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false # no dependencies
+
+      - name: Go format, vet and unit tests
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::Not formatted with gofmt: $unformatted"
+            exit 1
+          fi
+          go vet ./...
+          go test -race -count=1 ./...
+
+      - name: Lint the shell script
+        run: shellcheck test/run.sh
+
+      # The image against PostgreSQL 18 and a fake Backups: the received
+      # archive is checked with tar and restored with pg_restore.
+      - name: End-to-end test
+        run: test/run.sh
