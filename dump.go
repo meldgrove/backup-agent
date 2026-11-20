@@ -67,14 +67,31 @@ func splitPassword(databaseURL string) (string, string) {
 			u.User = url.User(u.User.Username())
 		}
 	}
-	if query := u.Query(); query.Has("password") {
+	if u.RawQuery != "" {
+		kept, fromQuery := stripPasswordParameter(u.RawQuery)
 		if password == "" {
-			password = query.Get("password")
+			password = fromQuery
 		}
-		query.Del("password")
-		u.RawQuery = query.Encode()
+		u.RawQuery = kept
 	}
 	return u.String(), password
+}
+
+// stripPasswordParameter removes "password=" from a query as libpq reads it:
+// names and values decode %XX, and a "+" stays a "+".
+func stripPasswordParameter(query string) (string, string) {
+	password := ""
+	kept := []string{}
+	for _, pair := range strings.Split(query, "&") {
+		if name, value, _ := strings.Cut(pair, "="); unescape(name) == "password" {
+			if password == "" {
+				password = unescape(value)
+			}
+			continue
+		}
+		kept = append(kept, pair)
+	}
+	return strings.Join(kept, "&"), password
 }
 
 // splitPasswordByHand removes the password from "scheme://user:password@hosts/…"
@@ -97,26 +114,21 @@ func splitPasswordByHand(databaseURL string) (string, string) {
 		}
 	}
 	if path, query, hasQuery := strings.Cut(tail, "?"); hasQuery {
-		kept := []string{}
-		for _, pair := range strings.Split(query, "&") {
-			if name, value, _ := strings.Cut(pair, "="); name == "password" {
-				if password == "" {
-					password = unescape(value)
-				}
-				continue
-			}
-			kept = append(kept, pair)
+		kept, fromQuery := stripPasswordParameter(query)
+		if password == "" {
+			password = fromQuery
 		}
 		tail = path
-		if len(kept) > 0 {
-			tail += "?" + strings.Join(kept, "&")
+		if kept != "" {
+			tail += "?" + kept
 		}
 	}
 	return scheme + "://" + authority + tail, password
 }
 
+// unescape decodes %XX as libpq does; a "+" stays a "+".
 func unescape(value string) string {
-	if decoded, err := url.QueryUnescape(value); err == nil {
+	if decoded, err := url.PathUnescape(value); err == nil {
 		return decoded
 	}
 	return value
