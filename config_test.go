@@ -35,6 +35,7 @@ func TestLoadConfigRejects(t *testing.T) {
 		{"BACKUP_URL": "https://backups.example.org", "BACKUP_TOKEN": "\"" + testToken + "\""},
 		{"DATABASE_URL": "mysql://app:secret-password@db/app"},
 		{"DATABASE_URL": "secret-password"},
+		{"DATABASE_URL": "postgres://app:secret-password@db:port/app"},
 		{"LOG_LEVEL": "loud"},
 		{"APP_NAME": "two\nlines"},
 	} {
