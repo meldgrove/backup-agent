@@ -68,6 +68,7 @@ func TestSplitPassword(t *testing.T) {
 		{"postgresql://app:p%40ss@db1:5433,db2/app?target_session_attrs=read-write", "postgresql://app@db1:5433,db2/app?target_session_attrs=read-write", "p@ss"},
 		{"postgresql://db1:5433,db2/app?password=pw&sslmode=require", "postgresql://db1:5433,db2/app?sslmode=require", "pw"},
 		{"postgresql://db1,db2/app?pass%77ord=a+b%2B", "postgresql://db1,db2/app", "a+b+"},
+		{"postgresql://db1:5433,db2/app?pass%77ord=a+b%2B", "postgresql://db1:5433,db2/app", "a+b+"},
 	}
 	for _, c := range cases {
 		url, password := splitPassword(c.in)
