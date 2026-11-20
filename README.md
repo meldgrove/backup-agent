@@ -39,6 +39,10 @@ services:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
       APP_NAME: handbook
       APP_IMAGE: *image
+      # The app's settings that a restore needs and that are not in the
+      # backup, such as keys that encrypt stored data: names only, never
+      # values. Each app's compose.yaml names its own.
+      APP_SECRETS: ENCRYPTION_KEY,AUTH_SECRET
     volumes:
       # Each volume of the app, read-only, below /data.
       - files:/data/files:ro
@@ -55,6 +59,7 @@ The agent needs no port and none of the app's other settings. Give it only
 | `BACKUP_DATA_DIR` | `/data` | Each directory directly below it is one volume. Missing or empty: no files in the backups. |
 | `APP_NAME` | empty | The app, such as `handbook`; shown in Backups. |
 | `APP_IMAGE` | empty | The app's image and tag; shown in Backups and stored in the archive. |
+| `APP_SECRETS` | empty | Names of the app's settings that a restore needs and that are not in the backup, separated by commas, such as `ENCRYPTION_KEY,AUTH_SECRET`. Names only, never values: at most 20, each a letter or `_`, then letters, digits or `_`, at most 100 characters. Sent to Backups and stored in the archive. |
 | `BACKUP_TMP_DIR` | `/tmp` | Where the database dump waits until it is sent. Needs room for one dump. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 
@@ -194,15 +199,18 @@ The heartbeat and the job pickup:
 ```json
 {
   "agent": { "version": "0.1.0" },
-  "app": { "name": "handbook", "image": "ghcr.io/meldgrove/handbook:0.3.1" },
+  "app": { "name": "handbook", "image": "ghcr.io/meldgrove/handbook:0.3.1", "secrets": ["ENCRYPTION_KEY"] },
   "database": true,
   "volumes": ["files"]
 }
 ```
 
-`database` is true when `DATABASE_URL` is set. `volumes` names the
-directories below `BACKUP_DATA_DIR`, sorted. The `check` command adds
-`"check": true`: Backups then answers as usual but hands out no job.
+`app.secrets` holds the names of `APP_SECRETS`, `[]` when it is empty: at
+most 20 names that match `^[A-Za-z_][A-Za-z0-9_]{0,99}$`. Older agents do
+not send it; Backups then takes `[]`. `database` is true when
+`DATABASE_URL` is set. `volumes` names the directories below
+`BACKUP_DATA_DIR`, sorted. The `check` command adds `"check": true`:
+Backups then answers as usual but hands out no job.
 
 ```json
 {
@@ -233,14 +241,15 @@ order:
      "format": 1,
      "createdAt": "2026-11-20T02:00:00Z",
      "agent": { "version": "0.1.0" },
-     "app": { "name": "handbook", "image": "ghcr.io/meldgrove/handbook:0.3.1" },
+     "app": { "name": "handbook", "image": "ghcr.io/meldgrove/handbook:0.3.1", "secrets": ["ENCRYPTION_KEY"] },
      "database": { "included": true, "file": "db.dump", "format": "pg_dump custom", "serverVersion": "18.1" },
      "volumes": ["files"]
    }
    ```
 
    Without a database: `"database": { "included": false }`. `serverVersion`
-   is `""` when the dump does not name it.
+   is `""` when the dump does not name it. `app.secrets` is as in the poll;
+   archives of older agents lack it.
 2. `db.dump`, when `DATABASE_URL` is set: `pg_dump --format=custom
    --compress=0` of `DATABASE_URL` (its password in `PGPASSWORD`), written to
    `BACKUP_TMP_DIR` first and deleted after the job. It is uncompressed, so

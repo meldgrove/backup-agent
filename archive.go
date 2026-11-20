@@ -33,6 +33,9 @@ type AgentInfo struct {
 type AppInfo struct {
 	Name  string `json:"name"`
 	Image string `json:"image"`
+	// Secrets: APP_SECRETS, the names of the app's settings that a restore
+	// needs and that are not in the backup; never values. [] when unset.
+	Secrets []string `json:"secrets"`
 }
 
 // ManifestDatabase: {"included": false} without a database; with one, also

@@ -124,11 +124,20 @@ func (a *Agent) pollRequest(check bool) PollRequest {
 	}
 	return PollRequest{
 		Agent:    AgentInfo{Version: a.cfg.Version},
-		App:      AppInfo{Name: a.cfg.AppName, Image: a.cfg.AppImage},
+		App:      a.appInfo(),
 		Database: a.cfg.DatabaseURL != "",
 		Volumes:  volumes,
 		Check:    check,
 	}
+}
+
+// appInfo is the app as the poll and manifest.json name it.
+func (a *Agent) appInfo() AppInfo {
+	secrets := a.cfg.AppSecrets
+	if secrets == nil {
+		secrets = []string{}
+	}
+	return AppInfo{Name: a.cfg.AppName, Image: a.cfg.AppImage, Secrets: secrets}
 }
 
 // jitter adds up to a tenth, so that agents started together spread out.
@@ -193,7 +202,7 @@ func (a *Agent) produce(ctx context.Context, job Job, log *slog.Logger) (Totals,
 		Format:    1,
 		CreatedAt: a.now().UTC().Format(time.RFC3339),
 		Agent:     AgentInfo{Version: a.cfg.Version},
-		App:       AppInfo{Name: a.cfg.AppName, Image: a.cfg.AppImage},
+		App:       a.appInfo(),
 		Volumes:   volumes,
 	}
 	dumpPath := ""

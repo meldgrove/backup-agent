@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -37,6 +38,7 @@ func TestLoadConfigRejects(t *testing.T) {
 		{"DATABASE_URL": "secret-password"},
 		{"LOG_LEVEL": "loud"},
 		{"APP_NAME": "two\nlines"},
+		{"APP_SECRETS": "ENCRYPTION_KEY=secret-password"},
 	} {
 		_, err := LoadConfig(func(name string) string { return bad[name] })
 		if err == nil {
@@ -46,6 +48,39 @@ func TestLoadConfigRejects(t *testing.T) {
 		if strings.Contains(err.Error(), "secret-password") || strings.Contains(err.Error(), testToken) {
 			t.Errorf("the error shows a secret: %v", err)
 		}
+	}
+}
+
+func TestAppSecrets(t *testing.T) {
+	long := "K" + strings.Repeat("_", 99)
+	twenty := make([]string, 20)
+	for i := range twenty {
+		twenty[i] = fmt.Sprintf("KEY_%d", i)
+	}
+	for value, want := range map[string]string{
+		"":                                   "",
+		" , ,":                               "",
+		"ENCRYPTION_KEY":                     "ENCRYPTION_KEY",
+		" ENCRYPTION_KEY , AUTH_SECRET,, ":   "ENCRYPTION_KEY AUTH_SECRET",
+		"B,A,B,_x9,A":                        "B A _x9",
+		long:                                 long,
+		strings.Join(twenty, ","):            strings.Join(twenty, " "),
+		strings.Join(twenty, ",") + ",KEY_0": strings.Join(twenty, " "),
+	} {
+		got, err := parseAppSecrets(value)
+		if err != nil || got == nil || strings.Join(got, " ") != want {
+			t.Errorf("parseAppSecrets(%q) = %q, %v", value, got, err)
+		}
+	}
+	for _, value := range []string{"ENCRYPTION_KEY=secret-password", "1KEY", "KEY-NAME", "KEY NAME", "secret-password", "ÄKEY", long + "X",
+		strings.Join(twenty, ",") + ",KEY_20"} {
+		if _, err := parseAppSecrets(value); err == nil || strings.Contains(err.Error(), "secret-password") {
+			t.Errorf("parseAppSecrets(%q): %v", value, err)
+		}
+	}
+	cfg, err := LoadConfig(func(name string) string { return map[string]string{"APP_SECRETS": "A, B"}[name] })
+	if err != nil || strings.Join(cfg.AppSecrets, " ") != "A B" {
+		t.Errorf("LoadConfig: %q, %v", cfg.AppSecrets, err)
 	}
 }
 

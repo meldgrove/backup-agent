@@ -56,6 +56,7 @@ sql() { docker exec backup-agent-test-db psql --username postgres --dbname "$1" 
 agent_settings=(--network host
   --env "BACKUP_URL=http://127.0.0.1:$server_port" --env "BACKUP_TOKEN=$token"
   --env APP_NAME=handbook --env APP_IMAGE=ghcr.io/meldgrove/handbook:0.3.1
+  --env "APP_SECRETS= ENCRYPTION_KEY, AUTH_SECRET,,ENCRYPTION_KEY"
   --volume "$files:/data/files:ro" --volume "$uploads:/data/uploads:ro")
 run() { docker run --detach --name backup-agent-test "$@" "$image" > /dev/null; }
 # Stops the agent; fails unless it exits with 0 within 10 seconds.
@@ -138,7 +139,8 @@ for want in "ok       Volumes in /data: files, uploads" \
   grep -qF "$want" <<< "$output" || fail "check did not print '$want': $output"
 done
 [ -e "$state/job" ] || fail "check took the job"
-tail -n 1 "$state/polls" | jq -e '.check == true and .database == true and .volumes == ["files", "uploads"]' > /dev/null ||
+tail -n 1 "$state/polls" | jq -e '.check == true and .database == true and .volumes == ["files", "uploads"] and
+  .app.secrets == ["ENCRYPTION_KEY", "AUTH_SECRET"]' > /dev/null ||
   fail "unexpected poll of check: $(tail -n 1 "$state/polls")"
 output=$(docker run --rm "${agent_settings[@]}" --env "DATABASE_URL=${database_url/$password/wrong-password}" "$image" check) &&
   fail "check passed with a wrong password"
@@ -184,7 +186,7 @@ done
 cmp "$uploads/photo.jpg" "$work/out/volumes/uploads/photo.jpg" || fail "photo.jpg differs"
 jq -e --arg version "$version" '.format == 1 and (.createdAt | test("^[0-9-]{10}T[0-9:]{8}Z$")) and
   ($version == "" or .agent.version == $version) and
-  .app == {"name": "handbook", "image": "ghcr.io/meldgrove/handbook:0.3.1"} and
+  .app == {"name": "handbook", "image": "ghcr.io/meldgrove/handbook:0.3.1", "secrets": ["ENCRYPTION_KEY", "AUTH_SECRET"]} and
   .database.included and .database.file == "db.dump" and .database.format == "pg_dump custom" and
   (.database.serverVersion | test("^18\\.[0-9]+$")) and .volumes == ["files", "uploads"]' "$work/out/manifest.json" > /dev/null ||
   fail "unexpected manifest: $(cat "$work/out/manifest.json")"

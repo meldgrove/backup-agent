@@ -97,7 +97,7 @@ func TestArchiveLayout(t *testing.T) {
 	}
 	version := "18.1"
 	manifest := Manifest{Format: 1, CreatedAt: "2026-11-20T02:00:00Z", Agent: AgentInfo{"0.1.0"},
-		App:      AppInfo{"handbook", "ghcr.io/meldgrove/handbook:0.3.1"},
+		App:      AppInfo{Name: "handbook", Image: "ghcr.io/meldgrove/handbook:0.3.1", Secrets: []string{"ENCRYPTION_KEY"}},
 		Database: ManifestDatabase{Included: true, File: dumpName, Format: "pg_dump custom", ServerVersion: &version},
 		Volumes:  volumes}
 
@@ -141,7 +141,7 @@ func TestArchiveLayout(t *testing.T) {
 	if err := json.Unmarshal([]byte(entries[0].content), &got); err != nil {
 		t.Fatalf("manifest.json: %v", err)
 	}
-	if got.Format != 1 || got.App.Name != "handbook" || !got.Database.Included || *got.Database.ServerVersion != "18.1" || len(got.Volumes) != 2 {
+	if got.Format != 1 || got.App.Name != "handbook" || strings.Join(got.App.Secrets, ",") != "ENCRYPTION_KEY" || !got.Database.Included || *got.Database.ServerVersion != "18.1" || len(got.Volumes) != 2 {
 		t.Errorf("manifest %+v", got)
 	}
 	if e := byName["db.dump"]; e.content != "PGDMP fake dump" || e.mode != 0o600 {
