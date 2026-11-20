@@ -257,4 +257,18 @@ tar -tvf "$state/stream.tar" | grep -qE '^drwx------ 10001/10001 .* volumes/priv
 stop
 pass "as the app's user (user: 10001:10001), check and the backup read the private folder"
 
+# A folder that others may list but not enter (0744): its names show, but
+# nothing in it can be read. That fails too, rather than a warning per file.
+as_root chmod 744 /v/jane-doe
+output=$(docker run --rm "${private_settings[@]}" "$image" check) && fail "check passed with a folder it cannot enter: $output"
+grep -qF 'problem  Volume private_data: backups fail. A folder cannot be read: "jane-doe" (permission denied).' <<< "$output" ||
+  fail "check did not explain the folder it cannot enter: $output"
+job
+run "${private_settings[@]}"
+eventually 30 test -s "$state/fail.json" || fail "no failure reported for a folder the agent cannot enter"
+[ "$(jq -r .message "$state/fail.json")" = "$folder_message" ] || fail "unexpected failure: $(cat "$state/fail.json")"
+[ ! -e "$state/complete.json" ] || fail "the backup completed without the folder's files"
+stop
+pass "a folder the agent may list but not enter fails check and the backup"
+
 echo "All tests passed."

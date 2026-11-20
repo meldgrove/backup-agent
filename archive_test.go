@@ -282,7 +282,7 @@ func TestCheckSummarizesAVolume(t *testing.T) {
 		{denyFiles("secret.txt", "b.md"), os.ReadDir, "warning",
 			`Volume private_data: 3 files, 5 bytes. Backups skip 2 files that cannot be read, such as "docs/b.md" (permission denied).` + hint},
 		{denyFiles("secret.txt"), denyFolders(syscall.EACCES, "jane-doe"), "problem",
-			`Volume private_data: backups fail. A folder cannot be read: "jane-doe" (permission denied).` + hint},
+			`Volume private_data: backups fail. A folder cannot be read: "jane-doe" (permission denied). They would also skip a file that cannot be read: "secret.txt" (permission denied).` + hint},
 		{openNoFollow, denyFolders(syscall.EACCES, "jane-doe", "john-doe"), "problem",
 			`Volume private_data: backups fail. 2 folders cannot be read, such as "jane-doe" (permission denied).` + hint},
 		{openNoFollow, denyFolders(syscall.EACCES, "private_data"), "problem",

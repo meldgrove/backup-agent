@@ -112,8 +112,13 @@ func describeVolume(volume string, s volumeSummary) (string, string) {
 	}
 	switch {
 	case s.folders > 0:
-		return "problem", fmt.Sprintf("Volume %s: backups fail. ", volume) +
-			which(s.folders, "A folder cannot be read", "folders cannot be read", s.folderPath, s.folderErr) + hint(s.folderOwner, s.folderErr)
+		text := fmt.Sprintf("Volume %s: backups fail. ", volume) +
+			which(s.folders, "A folder cannot be read", "folders cannot be read", s.folderPath, s.folderErr)
+		if s.skipped > 0 {
+			text += " They would also skip " +
+				which(s.skipped, "a file that cannot be read", "files that cannot be read", s.skippedPath, s.skippedErr)
+		}
+		return "problem", text + hint(s.folderOwner, s.folderErr)
 	case s.skipped > 0:
 		return "warning", held + " Backups skip " +
 			which(s.skipped, "a file that cannot be read", "files that cannot be read", s.skippedPath, s.skippedErr) + hint(s.skippedOwner, s.skippedErr)

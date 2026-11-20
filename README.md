@@ -63,7 +63,7 @@ The agent needs no port and none of the app's other settings. Give it only
 | `BACKUP_DATA_DIR` | `/data` | Each directory directly below it is one volume. Missing or empty: no files in the backups. |
 | `APP_NAME` | empty | The app, such as `helpdesk`; shown in Backups. |
 | `APP_IMAGE` | empty | The app's image and tag; shown in Backups and stored in the archive. |
-| `APP_SECRETS` | empty | Names of the app's settings that a restore needs and that are not in the backup, separated by commas, such as `ENCRYPTION_KEY,AUTH_SECRET`. Names only, never values: at most 20, each a letter or `_`, then letters, digits or `_`, at most 100 characters. Sent to Backups and stored in the archive. |
+| `APP_SECRETS` | empty | Names of the app's settings that a restore needs and that are not in the backup, separated by commas, such as `ENCRYPTION_KEY,AUTH_SECRET`. Names only, never values: each a letter or `_`, then letters, digits or `_`, at most 100 characters; spaces around them and repeated names are dropped, the order is kept, and at most 20 different names. Sent to Backups and stored in the archive. |
 | `BACKUP_TMP_DIR` | `/tmp` | Where the database dump waits until it is sent. Needs room for one dump. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 
@@ -120,7 +120,7 @@ level=INFO msg="Backup sent." job=4f0c… parts=4 bytes=61530112 duration=9s war
   Many apps keep files or folders that only their own user may read. Set
   `user:` of the `backup-agent` service to the app's user, such as
   `user: "10001:10001"`.
-- **A folder the agent cannot read fails the backup**, because a backup
+- **A folder the agent cannot read or enter fails the backup**, because a backup
   without it would look complete. Backups shows the volume and how to fix
   it, but not the folder's path: names of files and folders may hold
   personal data. The agent's log has the path.
@@ -273,7 +273,8 @@ order:
    is a directory that vanishes. A file that shrinks or fails while it is
    read is filled up with zeros to the size in its header, and counted in a
    warning. A directory (the volume included) that cannot be listed for
-   another reason fails the job (`/fail`), with a message that names the
+   another reason, or whose entries cannot be looked at (listed but not
+   entered), fails the job (`/fail`), with a message that names the
    volume but not the path, such as: `A folder in the volume "private_data"
    cannot be read (permission denied). Run the agent as the app's user: set
    user: of the backup-agent service, such as "10001:10001".` The user is

@@ -177,6 +177,7 @@ func (a *archive) addDirectory(dir, volume, name, rel string, info fs.FileInfo) 
 	case err != nil:
 		return a.unreadableFolder(volume, rel, info, err)
 	}
+	dirInfo := info
 	for _, entry := range entries {
 		if err := a.ctx.Err(); err != nil {
 			return err
@@ -185,6 +186,11 @@ func (a *archive) addDirectory(dir, volume, name, rel string, info fs.FileInfo) 
 		childName := name + "/" + entry.Name()
 		childRel := path.Join(rel, entry.Name())
 		info, err := os.Lstat(full)
+		if errors.Is(err, fs.ErrPermission) {
+			// Lstat needs only search permission on dir: a folder that may be
+			// listed but not entered fails the job like one that cannot be listed.
+			return a.unreadableFolder(volume, rel, dirInfo, err)
+		}
 		if err != nil {
 			a.skip(volume, childRel, err)
 			continue
@@ -258,6 +264,7 @@ func (a *archive) summarizeDirectory(s *volumeSummary, dir, rel string, info fs.
 		}
 		return nil
 	}
+	dirInfo := info
 	for _, entry := range entries {
 		if err := a.ctx.Err(); err != nil {
 			return err
@@ -265,6 +272,12 @@ func (a *archive) summarizeDirectory(s *volumeSummary, dir, rel string, info fs.
 		full := filepath.Join(dir, entry.Name())
 		childRel := path.Join(rel, entry.Name())
 		info, err := os.Lstat(full)
+		if errors.Is(err, fs.ErrPermission) { // dir may be listed but not entered
+			if s.folders++; s.folders == 1 {
+				s.folderPath, s.folderOwner, s.folderErr = orDefault(rel, "."), owner(dirInfo), err
+			}
+			return nil
+		}
 		if err == nil && info.IsDir() {
 			if err := a.summarizeDirectory(s, full, childRel, info); err != nil {
 				return err
