@@ -71,10 +71,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	}
 	if c.DatabaseURL != "" && !strings.HasPrefix(c.DatabaseURL, "postgres://") && !strings.HasPrefix(c.DatabaseURL, "postgresql://") {
 		return c, errors.New("DATABASE_URL must start with postgres:// or postgresql://.")
-	}
-	// A URL that does not parse would reach pg_dump with its password in the arguments.
-	if _, err := url.Parse(c.DatabaseURL); c.DatabaseURL != "" && err != nil {
-		return c, errors.New("DATABASE_URL is not a valid URL.")
+
 	}
 	for name, value := range map[string]string{"APP_NAME": c.AppName, "APP_IMAGE": c.AppImage} {
 		if len(value) > 200 || strings.ContainsFunc(value, func(r rune) bool { return r < 32 || r == 127 }) {

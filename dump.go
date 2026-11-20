@@ -52,11 +52,13 @@ func runPgDump(ctx context.Context, bin, databaseURL, file string, schemaOnly bo
 }
 
 // splitPassword takes the password out of a PostgreSQL URL, from its user
-// part or its password parameter. A URL that does not parse stays as it is.
+// part or its password parameter. libpq URLs that Go's parser refuses (several
+// hosts, such as postgresql://app:pw@db1:5433,db2/app) are split by hand, so
+// that the password never reaches pg_dump's arguments.
 func splitPassword(databaseURL string) (string, string) {
 	u, err := url.Parse(databaseURL)
 	if err != nil {
-		return databaseURL, ""
+		return splitPasswordByHand(databaseURL)
 	}
 	password := ""
 	if u.User != nil {
@@ -73,6 +75,51 @@ func splitPassword(databaseURL string) (string, string) {
 		u.RawQuery = query.Encode()
 	}
 	return u.String(), password
+}
+
+// splitPasswordByHand removes the password from "scheme://user:password@hosts/…"
+// and from a "password=" parameter, by position.
+func splitPasswordByHand(databaseURL string) (string, string) {
+	scheme, rest, ok := strings.Cut(databaseURL, "://")
+	if !ok {
+		return databaseURL, ""
+	}
+	authority, tail := rest, ""
+	if i := strings.IndexAny(rest, "/?"); i >= 0 {
+		authority, tail = rest[:i], rest[i:]
+	}
+	password := ""
+	if at := strings.LastIndex(authority, "@"); at >= 0 {
+		user, secret, hasSecret := strings.Cut(authority[:at], ":")
+		if hasSecret {
+			password = unescape(secret)
+			authority = user + authority[at:]
+		}
+	}
+	if path, query, hasQuery := strings.Cut(tail, "?"); hasQuery {
+		kept := []string{}
+		for _, pair := range strings.Split(query, "&") {
+			if name, value, _ := strings.Cut(pair, "="); name == "password" {
+				if password == "" {
+					password = unescape(value)
+				}
+				continue
+			}
+			kept = append(kept, pair)
+		}
+		tail = path
+		if len(kept) > 0 {
+			tail += "?" + strings.Join(kept, "&")
+		}
+	}
+	return scheme + "://" + authority + tail, password
+}
+
+func unescape(value string) string {
+	if decoded, err := url.QueryUnescape(value); err == nil {
+		return decoded
+	}
+	return value
 }
 
 // dumpEnvironment is the agent's environment without its secrets, and with

@@ -35,7 +35,6 @@ func TestLoadConfigRejects(t *testing.T) {
 		{"BACKUP_URL": "https://backups.example.org", "BACKUP_TOKEN": "\"" + testToken + "\""},
 		{"DATABASE_URL": "mysql://app:secret-password@db/app"},
 		{"DATABASE_URL": "secret-password"},
-		{"DATABASE_URL": "postgres://app:secret-password@db:port/app"},
 		{"LOG_LEVEL": "loud"},
 		{"APP_NAME": "two\nlines"},
 	} {
@@ -65,6 +64,9 @@ func TestSplitPassword(t *testing.T) {
 		{"postgres://app@db/app", "postgres://app@db/app", ""},
 		{"postgres://db/app?user=app&password=pw", "postgres://db/app?user=app", "pw"},
 		{"postgres://app@/app?host=/run/postgresql", "postgres://app@/app?host=/run/postgresql", ""},
+		// Several hosts (libpq), which Go's URL parser refuses: split by hand.
+		{"postgresql://app:p%40ss@db1:5433,db2/app?target_session_attrs=read-write", "postgresql://app@db1:5433,db2/app?target_session_attrs=read-write", "p@ss"},
+		{"postgresql://db1:5433,db2/app?password=pw&sslmode=require", "postgresql://db1:5433,db2/app?sslmode=require", "pw"},
 	}
 	for _, c := range cases {
 		url, password := splitPassword(c.in)
