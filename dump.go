@@ -52,7 +52,7 @@ func runPgDump(ctx context.Context, bin, databaseURL, file string, schemaOnly bo
 }
 
 // splitPassword takes the password out of a PostgreSQL URL, from its user
-// part or its password parameter. libpq URLs that Go's parser refuses (several
+// part or its password parameter; like libpq, the parameter wins. libpq URLs that Go's parser refuses (several
 // hosts, such as postgresql://app:pw@db1:5433,db2/app) are split by hand, so
 // that the password never reaches pg_dump's arguments.
 func splitPassword(databaseURL string) (string, string) {
@@ -69,7 +69,7 @@ func splitPassword(databaseURL string) (string, string) {
 	}
 	if u.RawQuery != "" {
 		kept, fromQuery := stripPasswordParameter(u.RawQuery)
-		if password == "" {
+		if fromQuery != "" {
 			password = fromQuery
 		}
 		u.RawQuery = kept
@@ -78,15 +78,13 @@ func splitPassword(databaseURL string) (string, string) {
 }
 
 // stripPasswordParameter removes "password=" from a query as libpq reads it:
-// names and values decode %XX, and a "+" stays a "+".
+// names and values decode %XX, a "+" stays a "+", and the last one counts.
 func stripPasswordParameter(query string) (string, string) {
 	password := ""
 	kept := []string{}
 	for _, pair := range strings.Split(query, "&") {
 		if name, value, _ := strings.Cut(pair, "="); unescape(name) == "password" {
-			if password == "" {
-				password = unescape(value)
-			}
+			password = unescape(value)
 			continue
 		}
 		kept = append(kept, pair)
@@ -115,7 +113,7 @@ func splitPasswordByHand(databaseURL string) (string, string) {
 	}
 	if path, query, hasQuery := strings.Cut(tail, "?"); hasQuery {
 		kept, fromQuery := stripPasswordParameter(query)
-		if password == "" {
+		if fromQuery != "" {
 			password = fromQuery
 		}
 		tail = path
