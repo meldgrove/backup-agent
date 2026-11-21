@@ -98,6 +98,10 @@ func TestSplitPassword(t *testing.T) {
 		{"postgresql://app:p%40ss%2Fword@db/app?sslmode=require", "postgresql://app@db/app?sslmode=require", "p@ss/word"},
 		{"postgres://app@db/app", "postgres://app@db/app", ""},
 		{"postgres://db/app?user=app&password=pw", "postgres://db/app?user=app", "pw"},
+		// libpq takes the password parameter over the user part, and the last one.
+		{"postgres://app:old@db/app?password=new", "postgres://app@db/app", "new"},
+		{"postgres://app@db/app?password=old&sslmode=require&password=new", "postgres://app@db/app?sslmode=require", "new"},
+		{"postgresql://app:old@db1:5433,db2/app?password=new", "postgresql://app@db1:5433,db2/app", "new"},
 		{"postgres://app@/app?host=/run/postgresql", "postgres://app@/app?host=/run/postgresql", ""},
 		// Several hosts (libpq), which Go's URL parser refuses: split by hand.
 		{"postgresql://app:p%40ss@db1:5433,db2/app?target_session_attrs=read-write", "postgresql://app@db1:5433,db2/app?target_session_attrs=read-write", "p@ss"},
