@@ -121,9 +121,11 @@ works without `BACKUP_URL`. The
 on a server before each update. By hand, in the app's folder:
 
 ```sh
-docker compose run --rm -T --no-deps backup-agent dump-database > app.dump
+(umask 077 && rm -f app.dump && docker compose run --rm -T --no-deps backup-agent dump-database > app.dump)
 ```
 
+`umask 077` and a new file keep the dump for its owner only: it holds the
+whole database.
 Keep `-T`: a terminal (TTY) changes the bytes of the dump, so the agent
 refuses to write to one. A failure is one line on stderr, without the
 password or the URL, and exit code 1. Agents older than this command print
