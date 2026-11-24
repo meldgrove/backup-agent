@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -65,5 +67,95 @@ func TestVersionAndUsage(t *testing.T) {
 	}
 	if code := run(context.Background(), []string{"backup"}, getenv, &out, &errOut); code != 2 || !strings.HasPrefix(errOut.String(), "Usage:") {
 		t.Errorf("an unknown command: exit %d, %q", code, errOut.String())
+	}
+	errOut.Reset()
+	if code := run(context.Background(), []string{"dump-database", "extra"}, getenv, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "dump-database") {
+		t.Errorf("dump-database with an argument: exit %d, %q", code, errOut.String())
+	}
+}
+
+func TestDumpDatabaseWritesTheDumpToStdout(t *testing.T) {
+	bin, record := fakePgDump(t, `printf 'PGDMP and the rest'`)
+	t.Setenv("BACKUP_TOKEN", testToken)
+	t.Setenv("DATABASE_URL", "postgres://other@db/other")
+	// Only DATABASE_URL counts: Backups' settings may be empty or wrong.
+	env := map[string]string{"DATABASE_URL": "postgresql://app:s3cr%40t@db:5432/app?sslmode=disable", "BACKUP_URL": "not a URL", "LOG_LEVEL": "loud"}
+	var out, errOut bytes.Buffer
+	if code := dumpDatabase(context.Background(), func(name string) string { return env[name] }, bin, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	if out.String() != "PGDMP and the rest" || errOut.Len() != 0 {
+		t.Errorf("stdout %q, stderr %q", out.String(), errOut.String())
+	}
+	args, _ := os.ReadFile(record)
+	if string(args) != "--format=custom\n--no-password\n--dbname=postgresql://app@db:5432/app?sslmode=disable\nPGPASSWORD=s3cr@t\nDATABASE_URL= BACKUP_TOKEN=\n" {
+		t.Errorf("pg_dump got:\n%s", args)
+	}
+}
+
+func TestDumpDatabaseFailures(t *testing.T) {
+	failing, _ := fakePgDump(t, `echo 'pg_dump: error: connection to server at "db" failed: FATAL:  password authentication failed for user "app" (postgres://app:hunter2-secret@db/app)' >&2
+exit 1`)
+	for _, c := range []struct {
+		name, databaseURL, bin, want string
+	}{
+		{"no URL", "", failing, "DATABASE_URL is empty, so there is no database to dump.\n"},
+		{"no PostgreSQL URL", "mysql://app:hunter2-secret@db/app", failing, "DATABASE_URL must start with postgres:// or postgresql://.\n"},
+		{"pg_dump fails", "postgres://app:hunter2-secret@db/app", failing,
+			`pg_dump failed: connection to server at "db" failed: FATAL: password authentication failed for user "app" ([redacted])` + "\n"},
+		{"no pg_dump", "postgres://app:hunter2-secret@db/app", "/nonexistent/pg_dump", "pg_dump failed: "},
+	} {
+		var out, errOut bytes.Buffer
+		getenv := func(name string) string { return map[string]string{"DATABASE_URL": c.databaseURL}[name] }
+		if code := dumpDatabase(context.Background(), getenv, c.bin, &out, &errOut); code != 1 {
+			t.Errorf("%s: exit %d, want 1", c.name, code)
+		}
+		if !strings.HasPrefix(errOut.String(), c.want) || strings.Count(errOut.String(), "\n") != 1 || strings.Contains(errOut.String(), "hunter2") {
+			t.Errorf("%s: stderr %q, want %q", c.name, errOut.String(), c.want)
+		}
+	}
+}
+
+func TestDumpDatabaseStops(t *testing.T) {
+	bin, _ := fakePgDump(t, "exec sleep 30")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	var errOut bytes.Buffer
+	start := time.Now()
+	getenv := func(name string) string { return map[string]string{"DATABASE_URL": "postgres://app@db/app"}[name] }
+	if code := dumpDatabase(ctx, getenv, bin, io.Discard, &errOut); code != 1 || errOut.String() != "The dump was stopped.\n" {
+		t.Errorf("exit %d, stderr %q", code, errOut.String())
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Error("pg_dump was not stopped")
+	}
+}
+
+// A terminal (docker run -t, docker compose run without -T) would change
+// the bytes of the dump; /dev/null and files are fine.
+func TestDumpDatabaseRefusesATerminal(t *testing.T) {
+	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer null.Close()
+	file, err := os.Create(t.TempDir() + "/app.dump")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if isTerminal(null) || isTerminal(file) || isTerminal(&bytes.Buffer{}) {
+		t.Error("/dev/null, a file or a buffer counts as a terminal")
+	}
+	terminal, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+	if err != nil {
+		t.Skipf("no pseudo-terminal here: %v", err)
+	}
+	defer terminal.Close()
+	var errOut bytes.Buffer
+	getenv := func(name string) string { return map[string]string{"DATABASE_URL": "postgres://app@db/app"}[name] }
+	if code := run(context.Background(), []string{"dump-database"}, getenv, terminal, &errOut); code != 1 ||
+		!strings.HasPrefix(errOut.String(), "The dump goes to stdout, which is a terminal here.") {
+		t.Errorf("exit %d, stderr %q", code, errOut.String())
 	}
 }
