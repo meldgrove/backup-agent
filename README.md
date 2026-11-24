@@ -19,7 +19,8 @@ Backups: checks the totals ─► restic snapshot
 The agent only reads. It restores nothing, opens no port, needs no Docker
 socket, and only connects out to Backups. It is one Go program without
 dependencies, plus `pg_dump` 18. It runs as `nobody`, or as the app's user
-(`user:`).
+(`user:`). `dump-database` writes the database alone to stdout, for a copy
+outside Backups ([Dump the database](#dump-the-database)).
 
 ## Settings
 
@@ -110,6 +111,51 @@ level=INFO msg="Backup started." job=4f0c… partBytes=16777216
 level=INFO msg="Database dumped." job=4f0c… bytes=48211337 duration=3s serverVersion=18.1
 level=INFO msg="Backup sent." job=4f0c… parts=4 bytes=61530112 duration=9s warnings=""
 ```
+
+## Dump the database
+
+`dump-database` writes a dump of `DATABASE_URL` to stdout:
+`pg_dump --format=custom`, compressed. It needs only `DATABASE_URL`; it
+works without `BACKUP_URL`. The
+[Meldgrove Updater](https://github.com/meldgrove/updater) takes such a dump
+on a server before each update. By hand, in the app's folder:
+
+```sh
+(umask 077 && rm -f app.dump && docker compose run --rm -T --no-deps backup-agent dump-database > app.dump)
+```
+
+`umask 077` and a new file keep the dump for its owner only: it holds the
+whole database.
+Keep `-T`: a terminal (TTY) changes the bytes of the dump, so the agent
+refuses to write to one. A failure is one line on stderr, without the
+password or the URL, and exit code 1. Agents older than this command print
+their usage and exit with 2.
+
+### Restore a dump
+
+1. Stop the app, but not its database: `docker compose stop web worker`
+   (the app's services).
+2. Restore the dump, in the app's folder:
+
+   ```sh
+   docker compose run --rm -T --no-deps --entrypoint sh backup-agent -c '
+     pg_restore --clean --if-exists --no-owner --file=/tmp/restore.sql &&
+     psql --dbname="$DATABASE_URL" --single-transaction --set=ON_ERROR_STOP=1 --quiet --output=/dev/null \
+       --command="SET client_min_messages = warning; DROP SCHEMA public CASCADE;
+         CREATE SCHEMA public AUTHORIZATION pg_database_owner; GRANT USAGE ON SCHEMA public TO PUBLIC;" \
+       --file=/tmp/restore.sql' < app.dump
+   ```
+
+   It uses the image's `pg_restore` and `psql`. It empties the schema
+   `public`, so tables that a newer version added go as well, then restores
+   the dump; all in one transaction. When anything fails, the database
+   stays as it was. It needs PostgreSQL 15 or newer, a `DATABASE_URL` whose
+   user owns the database, and room in the container's `/tmp` for the dump
+   as SQL.
+3. Start the app version that wrote the dump. If `.env` names a newer
+   version now (such as `HELPDESK_VERSION=0.3.2`), set it back first; a
+   newer version would migrate the database again. Then
+   `docker compose up -d`.
 
 ## Good to know
 

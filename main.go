@@ -1,7 +1,8 @@
 // Meldgrove Backup Agent: a sidecar of a self-hosted Meldgrove app. It asks
 // Meldgrove Backups over HTTPS for jobs and, for each, sends one tar archive
-// of the app's database (pg_dump) and its volumes, in parts. It opens no
-// port and restores nothing. See README.md.
+// of the app's database (pg_dump) and its volumes, in parts. dump-database
+// writes only the database to stdout. It opens no port and restores
+// nothing. See README.md.
 package main
 
 import (
@@ -15,9 +16,10 @@ import (
 )
 
 const usage = `Usage: backup-agent [command]
-  (none)    ask Meldgrove Backups for jobs and run them
-  check     check the settings, the volumes, pg_dump, the database and Backups
-  version   print the agent's version`
+  (none)          ask Meldgrove Backups for jobs and run them
+  check           check the settings, the volumes, pg_dump, the database and Backups
+  dump-database   write a dump of DATABASE_URL to stdout (pg_dump, custom format)
+  version         print the agent's version`
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -42,6 +44,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	case command == "-h", command == "--help", command == "help":
 		fmt.Fprintln(stdout, usage)
 		return 0
+	case command == "dump-database":
+		return dumpDatabase(ctx, getenv, "pg_dump", stdout, stderr)
 	case command != "" && command != "check":
 		fmt.Fprintln(stderr, usage)
 		return 2

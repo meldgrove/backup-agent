@@ -9,13 +9,14 @@ contract of the protocol.
 ## Layout
 
 ```
-main.go         commands: run (no argument), check, version
+main.go         commands: run (no argument), check, dump-database, version
 config.go       the settings (environment), the volumes below BACKUP_DATA_DIR
 agent.go        the poll loop; a job from pg_dump to /complete or /fail
 client.go       the protocol over HTTP: poll, parts with retries, progress, complete, fail
 archive.go      the tar stream: manifest.json, db.dump, volumes/<name>/…
 parts.go        cuts the stream into parts, with SHA-256 per part and in total
-dump.go         runs pg_dump; its error lines; the server version from the dump header
+dump.go         runs pg_dump; its error lines; the server version from the dump
+                header; the dump-database command (pg_dump to stdout)
 check.go        the check command
 redact.go       keeps secrets out of logs and failure messages; the logger
 version.go      the version (APP_VERSION of the image) and the User-Agent

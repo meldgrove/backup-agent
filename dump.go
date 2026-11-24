@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -22,18 +23,24 @@ type dumpError struct{ message string }
 func (e *dumpError) Error() string { return e.message }
 
 // runPgDump writes the database to file with
-// pg_dump --format=custom --compress=0 --dbname=DATABASE_URL. The password
-// goes in PGPASSWORD instead of the URL, so it shows in no process list.
+// pg_dump --format=custom --compress=0 --dbname=DATABASE_URL.
 // schemaOnly dumps only the schema (the check command).
 func runPgDump(ctx context.Context, bin, databaseURL, file string, schemaOnly bool) error {
-	dbname, password := splitPassword(databaseURL)
 	args := []string{"--format=custom", "--compress=0", "--no-password", "--file=" + file}
 	if schemaOnly {
 		args = append(args, "--schema-only")
 	}
-	args = append(args, "--dbname="+dbname)
-	cmd := exec.CommandContext(ctx, bin, args...)
+	return pgDump(ctx, bin, databaseURL, args, nil)
+}
+
+// pgDump runs pg_dump with args and --dbname=DATABASE_URL, its output to
+// stdout (nil: none). The password goes in PGPASSWORD instead of the URL,
+// so it shows in no process list.
+func pgDump(ctx context.Context, bin, databaseURL string, args []string, stdout io.Writer) error {
+	dbname, password := splitPassword(databaseURL)
+	cmd := exec.CommandContext(ctx, bin, append(args, "--dbname="+dbname)...)
 	cmd.Env = dumpEnvironment(os.Environ(), password)
+	cmd.Stdout = stdout
 	stderr := &tail{max: 16 << 10}
 	cmd.Stderr = stderr
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
@@ -49,6 +56,51 @@ func runPgDump(ctx context.Context, bin, databaseURL, file string, schemaOnly bo
 		return &dumpError{message: "pg_dump failed: " + detail}
 	}
 	return nil
+}
+
+// dumpDatabase is the dump-database command: pg_dump --format=custom of
+// DATABASE_URL to stdout, compressed (pg_dump's default), such as the dump
+// that the Meldgrove Updater takes before each update. It needs only
+// DATABASE_URL. A failure is one line on stderr, without secrets, and exit
+// code 1.
+func dumpDatabase(ctx context.Context, getenv func(string) string, bin string, stdout, stderr io.Writer) int {
+	cfg := Config{Token: getenv("BACKUP_TOKEN"), DatabaseURL: getenv("DATABASE_URL")}
+	fail := func(message string) int {
+		fmt.Fprintln(stderr, message)
+		return 1
+	}
+	switch {
+	case cfg.DatabaseURL == "":
+		return fail("DATABASE_URL is empty, so there is no database to dump.")
+	case !isPostgresURL(cfg.DatabaseURL):
+		return fail(errDatabaseURL.Error())
+	case isTerminal(stdout):
+		return fail("The dump goes to stdout, which is a terminal here. Write it to a file: docker compose run --rm -T backup-agent dump-database > app.dump")
+	}
+	err := pgDump(ctx, bin, cfg.DatabaseURL, []string{"--format=custom", "--no-password"}, stdout)
+	switch {
+	case err == nil:
+		return 0
+	case ctx.Err() != nil:
+		return fail("The dump was stopped.")
+	}
+	return fail(failMessage(err.Error(), cfg.Secrets()))
+}
+
+// isTerminal tells whether w is a terminal, such as the TTY of docker run
+// -t, which would change the bytes of a dump. /dev/null is a character
+// device too, but no terminal.
+func isTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	null, err := os.Stat(os.DevNull)
+	return err != nil || !os.SameFile(info, null)
 }
 
 // splitPassword takes the password out of a PostgreSQL URL, from its user

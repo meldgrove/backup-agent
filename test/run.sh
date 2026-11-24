@@ -203,6 +203,41 @@ docker exec backup-agent-test-db pg_restore --username postgres --no-owner --dbn
 [ "$(sql restored 'SELECT string_agg(body, $$,$$ ORDER BY id) FROM notes')" = "one,two,three" ] || fail "the restored database differs"
 pass "db.dump restores with pg_restore"
 
+# dump-database: the database alone to stdout, without Backups' settings.
+# Restored with the command of README.md ("Restore a dump"), also over a
+# newer version's migration, which that command undoes in full.
+docker run --rm --network host --env "DATABASE_URL=$database_url" "$image" dump-database > "$work/app.dump" ||
+  fail "dump-database failed"
+[ "$(head -c 5 "$work/app.dump")" = PGDMP ] || fail "dump-database wrote no pg_dump archive"
+# shellcheck disable=SC2016 # the container's shell expands $DATABASE_URL
+restore_script='
+  pg_restore --clean --if-exists --no-owner --file=/tmp/restore.sql &&
+  psql --dbname="$DATABASE_URL" --single-transaction --set=ON_ERROR_STOP=1 --quiet --output=/dev/null \
+    --command="SET client_min_messages = warning; DROP SCHEMA public CASCADE;
+      CREATE SCHEMA public AUTHORIZATION pg_database_owner; GRANT USAGE ON SCHEMA public TO PUBLIC;" \
+    --file=/tmp/restore.sql'
+restore() {
+  docker run --rm --interactive --network host --env "DATABASE_URL=${database_url%/app}/dumped" --entrypoint sh "$image" -c "$restore_script" < "$1"
+}
+docker exec backup-agent-test-db createdb --username postgres dumped
+restore "$work/app.dump" || fail "the dump of dump-database did not restore"
+[ "$(sql dumped 'SELECT string_agg(body, $$,$$ ORDER BY id) FROM notes')" = "one,two,three" ] || fail "the restored dump differs"
+sql dumped "CREATE TABLE tags (note_id int NOT NULL REFERENCES notes); INSERT INTO tags VALUES (1); UPDATE notes SET body = 'new';"
+head -c 2000 "$work/app.dump" > "$work/truncated.dump"
+restore "$work/truncated.dump" 2> /dev/null && fail "a truncated dump restored"
+[ "$(sql dumped 'SELECT count(*) FROM tags')" = 1 ] || fail "a failed restore changed the database"
+restore "$work/app.dump" || fail "the dump did not restore over the migration"
+[ "$(sql dumped 'SELECT string_agg(body, $$,$$ ORDER BY id) FROM notes')" = "one,two,three" ] || fail "the restore did not undo the migration"
+[ "$(sql dumped "SELECT to_regclass('public.tags') IS NULL")" = t ] || fail "the restore kept the table of the migration"
+output=$(docker run --rm --network host --env "DATABASE_URL=${database_url/$password/wrong-password}" "$image" dump-database 2>&1 > "$work/failed.dump") &&
+  fail "dump-database passed with a wrong password"
+grep -q "^pg_dump failed: .*password authentication failed" <<< "$output" || fail "dump-database did not explain: $output"
+if [ "$(wc -l <<< "$output")" != 1 ] || grep -qF wrong-password <<< "$output"; then fail "unexpected error: $output"; fi
+[ ! -s "$work/failed.dump" ] || fail "a failed dump wrote data"
+output=$(docker run --rm --tty --env "DATABASE_URL=$database_url" "$image" dump-database 2>&1) && fail "dump-database wrote to a terminal"
+grep -q "which is a terminal" <<< "$output" || fail "dump-database did not refuse the terminal: $output"
+pass "dump-database writes a dump that restores, also over a migration, and fails without secrets or on a terminal"
+
 # pg_dump fails: Backups hears why, without the password; nothing is sent.
 job
 run "${agent_settings[@]}" --env "DATABASE_URL=${database_url/$password/wrong-password}"

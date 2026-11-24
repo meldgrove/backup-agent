@@ -77,9 +77,8 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 			return c, errors.New("BACKUP_TOKEN is not a token of Meldgrove Backups: it starts with mgb_ and has 47 characters, without spaces or quotes.")
 		}
 	}
-	if c.DatabaseURL != "" && !strings.HasPrefix(c.DatabaseURL, "postgres://") && !strings.HasPrefix(c.DatabaseURL, "postgresql://") {
-		return c, errors.New("DATABASE_URL must start with postgres:// or postgresql://.")
-
+	if c.DatabaseURL != "" && !isPostgresURL(c.DatabaseURL) {
+		return c, errDatabaseURL
 	}
 	for name, value := range map[string]string{"APP_NAME": c.AppName, "APP_IMAGE": c.AppImage} {
 		if len(value) > 200 || strings.ContainsFunc(value, func(r rune) bool { return r < 32 || r == 127 }) {
@@ -92,6 +91,12 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	}
 	c.AppSecrets = secrets
 	return c, nil
+}
+
+var errDatabaseURL = errors.New("DATABASE_URL must start with postgres:// or postgresql://.")
+
+func isPostgresURL(databaseURL string) bool {
+	return strings.HasPrefix(databaseURL, "postgres://") || strings.HasPrefix(databaseURL, "postgresql://")
 }
 
 // parseAppSecrets reads APP_SECRETS: names separated by commas, without
